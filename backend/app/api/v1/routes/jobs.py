@@ -128,11 +128,28 @@ def requeue_job(
     redis_client: RedisClient,
     _: Annotated[User, Depends(require_roles(UserRole.ADMIN))],
 ) -> dict:
+    settings = get_settings()
     job = db.get(Job, job_id)
     if not job:
         return {"data": None, "meta": {"status": "missing"}}
     if job.status not in {JobStatus.FAILED, JobStatus.RETRYING, JobStatus.QUEUED}:
         return {"data": {"job_id": job.id}, "meta": {"status": "ignored", "reason": f"status={job.status.value}"}}
+
+    queue_path = Path(job.queue_path)
+    failed_path = Path(settings.processing_failed_path) / queue_path.name
+    restored_from_failed = False
+
+    if not queue_path.exists() and failed_path.exists():
+        queue_path.parent.mkdir(parents=True, exist_ok=True)
+        failed_path.replace(queue_path)
+        restored_from_failed = True
+
+    if not queue_path.exists():
+        return {
+            "data": {"job_id": job.id},
+            "meta": {"status": "missing_source", "reason": f"queue file {queue_path.name} not found"},
+        }
+
     job.status = JobStatus.QUEUED
     job.last_error = None
     job.locked_at = None
@@ -140,7 +157,7 @@ def requeue_job(
     db.add(job)
     db.commit()
     redis_client.rpush(ingest_queue_name_for_provider(resolve_tagger_provider(db)), str(job.id))
-    return {"data": {"job_id": job.id}, "meta": {"status": "queued"}}
+    return {"data": {"job_id": job.id}, "meta": {"status": "queued", "restored_from_failed": restored_from_failed}}
 
 
 @router.post("/{job_id}/dismiss")
