@@ -1,0 +1,118 @@
+services:
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    environment:
+      HOSTNAME: ${FRONTEND_HOST:-0.0.0.0}
+      PORT: 3000
+      NEXT_PUBLIC_API_BASE_URL: ${PUBLIC_API_BASE_URL:-http://localhost:18000}
+      INTERNAL_API_BASE_URL: ${INTERNAL_API_BASE_URL:-http://backend:8000}
+    ports:
+      - "${FRONTEND_PORT:-13000}:3000"
+    depends_on:
+      backend:
+        condition: service_started
+
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    environment:
+      APP_ENV: ${APP_ENV:-development}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      PROJECT_NAME: ${PROJECT_NAME:-NextBoo}
+      API_HOST: ${API_HOST:-0.0.0.0}
+      API_PORT: 8000
+      POSTGRES_HOST: ${POSTGRES_HOST:-postgres}
+      POSTGRES_PORT: ${POSTGRES_PORT:-5432}
+      POSTGRES_DB: ${POSTGRES_DB:-nextboo}
+      POSTGRES_USER: ${POSTGRES_USER:-nextboo}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-nextboo}
+      REDIS_HOST: ${REDIS_HOST:-redis}
+      REDIS_PORT: ${REDIS_PORT:-6379}
+      QUEUE_PATH: ${QUEUE_PATH:-/app/queue}
+      PROCESSING_PATH: ${PROCESSING_PATH:-/app/processing}
+      PROCESSING_FAILED_PATH: ${PROCESSING_FAILED_PATH:-/app/processing_failed}
+      CONTENT_PATH: ${CONTENT_PATH:-/app/content}
+      THUMB_PATH: ${THUMB_PATH:-/app/content_thumbs}
+      IMPORT_PATH: ${IMPORT_PATH:-/app/imports}
+      MODEL_PATH: ${MODEL_PATH:-/models}
+      JWT_SECRET: ${JWT_SECRET:-change-me}
+      JWT_ALGORITHM: ${JWT_ALGORITHM:-HS256}
+      ACCESS_TOKEN_EXPIRE_MINUTES: ${ACCESS_TOKEN_EXPIRE_MINUTES:-15}
+      REFRESH_TOKEN_EXPIRE_MINUTES: ${REFRESH_TOKEN_EXPIRE_MINUTES:-43200}
+      CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:13000}
+    ports:
+      - "${API_PORT:-18000}:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_started
+    volumes:
+      - ${GALLERY_ROOT:-./gallery}/queue:/app/queue
+      - ${GALLERY_ROOT:-./gallery}/processing:/app/processing
+      - ${GALLERY_ROOT:-./gallery}/processing_failed:/app/processing_failed
+      - ${GALLERY_ROOT:-./gallery}/content:/app/content
+      - ${GALLERY_ROOT:-./gallery}/content_thumbs:/app/content_thumbs
+      - ${GALLERY_ROOT:-./gallery}/imports:/app/imports
+      - ${GALLERY_ROOT:-./gallery}/models:/models
+
+  worker:
+    build:
+      context: ./worker
+      dockerfile: Dockerfile
+    environment:
+      APP_ENV: ${APP_ENV:-development}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      PROJECT_NAME: ${PROJECT_NAME:-NextBoo}
+      POSTGRES_HOST: ${POSTGRES_HOST:-postgres}
+      POSTGRES_PORT: ${POSTGRES_PORT:-5432}
+      POSTGRES_DB: ${POSTGRES_DB:-nextboo}
+      POSTGRES_USER: ${POSTGRES_USER:-nextboo}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-nextboo}
+      REDIS_HOST: ${REDIS_HOST:-redis}
+      REDIS_PORT: ${REDIS_PORT:-6379}
+      QUEUE_PATH: ${QUEUE_PATH:-/app/queue}
+      PROCESSING_PATH: ${PROCESSING_PATH:-/app/processing}
+      PROCESSING_FAILED_PATH: ${PROCESSING_FAILED_PATH:-/app/processing_failed}
+      CONTENT_PATH: ${CONTENT_PATH:-/app/content}
+      THUMB_PATH: ${THUMB_PATH:-/app/content_thumbs}
+      IMPORT_PATH: ${IMPORT_PATH:-/app/imports}
+      MODEL_PATH: ${MODEL_PATH:-/models}
+      WORKER_CONCURRENCY: ${WORKER_CONCURRENCY:-2}
+      THUMB_MAX_EDGE: ${THUMB_MAX_EDGE:-250}
+      TAGGER_PROVIDER: camie
+      QUEUE_NAME: jobs:ingest:camie
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_started
+    volumes:
+      - ${GALLERY_ROOT:-./gallery}/queue:/app/queue
+      - ${GALLERY_ROOT:-./gallery}/processing:/app/processing
+      - ${GALLERY_ROOT:-./gallery}/processing_failed:/app/processing_failed
+      - ${GALLERY_ROOT:-./gallery}/content:/app/content
+      - ${GALLERY_ROOT:-./gallery}/content_thumbs:/app/content_thumbs
+      - ${GALLERY_ROOT:-./gallery}/imports:/app/imports
+      - ${GALLERY_ROOT:-./gallery}/models:/models
+
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-nextboo}
+      POSTGRES_USER: ${POSTGRES_USER:-nextboo}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-nextboo}
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-nextboo} -d ${POSTGRES_DB:-nextboo}"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+    volumes:
+      - ${GALLERY_ROOT:-./gallery}/database:/var/lib/postgresql/data
+
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--save", "60", "1", "--loglevel", "warning"]
