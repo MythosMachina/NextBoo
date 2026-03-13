@@ -27,6 +27,7 @@ class ImageTagItem(BaseModel):
     confidence: float | None
     source: TagSource
     is_manual: bool
+    rating_cue: str | None = None
 
 
 class ImageVariantItem(BaseModel):

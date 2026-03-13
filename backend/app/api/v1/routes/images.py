@@ -10,6 +10,7 @@ from app.models.user import User
 from app.schemas.image import ImageDetail, ImageDetailResponse, ImageListItem, ImageListResponse
 from app.schemas.moderation import ImageMetadataUpdate, ImageReportCreate, ImageVisibilityUpdate
 from app.services.media import build_media_url, thumb_url_for_image
+from app.services.rating_cues import apply_staff_rating_cues
 from app.services.search import normalize_tag_token, parse_media_type_filter, parse_rating_filter
 from app.services.deletion import hard_delete_image
 from app.services.rating_rules import load_rating_rule_map, reclassify_image_from_rules, resolve_open_reports_for_release
@@ -187,6 +188,7 @@ def get_image(
     for variant in detail.variants:
         variant.url = build_media_url(variant.relative_path)
     attach_image_state(detail, image, current_user)
+    apply_staff_rating_cues(detail, current_user)
     return ImageDetailResponse(data=detail, meta={})
 
 

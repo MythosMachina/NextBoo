@@ -27,6 +27,7 @@ type TagItem = {
   confidence: number | null;
   source: "auto" | "user" | "system";
   is_manual: boolean;
+  rating_cue?: "questionable" | "explicit" | null;
 };
 
 type ImageDetail = {
@@ -45,14 +46,31 @@ type ImageDetail = {
   tags: TagItem[];
 };
 
+const TAG_CATEGORY_ORDER: TagItem["tag"]["category"][] = [
+  "character",
+  "artist",
+  "copyright",
+  "meta",
+  "general",
+];
+
+const TAG_CATEGORY_LABELS: Record<TagItem["tag"]["category"], string> = {
+  character: "Character Tags",
+  artist: "Artist Tags",
+  copyright: "Series Tags",
+  meta: "Meta Tags",
+  general: "General Tags",
+};
+
 export default function PostDetailPage() {
   const params = useParams<{ id: string }>();
   const router = useRouter();
-  const { isAdmin } = useAuthState();
+  const { isAdmin, isStaff } = useAuthState();
   const [image, setImage] = useState<ImageDetail | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [deleting, setDeleting] = useState(false);
+  const [generalTagsOpen, setGeneralTagsOpen] = useState(false);
 
   useEffect(() => {
     async function loadImage() {
@@ -100,6 +118,13 @@ export default function PostDetailPage() {
     acc[key].push(item);
     return acc;
   }, {});
+  const orderedTagGroups = TAG_CATEGORY_ORDER
+    .map((category) => ({
+      category,
+      label: TAG_CATEGORY_LABELS[category],
+      tags: (groupedTags[category] ?? []).slice().sort((left, right) => left.tag.display_name.localeCompare(right.tag.display_name)),
+    }))
+    .filter((group) => group.tags.length > 0);
 
   async function handleDelete() {
     if (!isAdmin || deleting || !image) {
@@ -204,28 +229,47 @@ export default function PostDetailPage() {
         <section className="panel">
           <h2>Tags</h2>
           <div className="post-tag-groups">
-            {Object.entries(groupedTags).map(([category, tags]) => (
-              <div className="post-tag-group" key={category}>
-                <h3>{category}</h3>
-                <div className="post-tag-list">
-                  {tags.map((item) => (
-                    <div className="post-tag-row" key={`${item.tag.id}-${item.source}`}>
-                      <TagLink
-                        className={`tag tag-${item.tag.category}`}
-                        href={`/?q=${encodeURIComponent(item.tag.name_normalized)}`}
-                        tagName={item.tag.name_normalized}
+            {orderedTagGroups.map((group) => {
+              const collapsible = group.category === "general";
+              const open = collapsible ? generalTagsOpen : true;
+              return (
+                <div className="post-tag-group" key={group.category}>
+                  <div className="post-tag-group-head">
+                    <h3>{group.label}</h3>
+                    {collapsible ? (
+                      <button
+                        className="post-tag-toggle"
+                        onClick={() => setGeneralTagsOpen((current) => !current)}
+                        type="button"
                       >
-                        {item.tag.display_name}
-                      </TagLink>
-                      <span className="post-tag-meta">
-                        {item.is_manual ? "manual" : item.source}
-                        {item.confidence !== null ? ` · ${(item.confidence * 100).toFixed(0)}%` : ""}
-                      </span>
+                        {open ? "Hide" : `Show (${group.tags.length})`}
+                      </button>
+                    ) : null}
+                  </div>
+                  {open ? (
+                    <div className="post-tag-list">
+                      {group.tags.map((item) => (
+                        <div className="post-tag-row" key={`${item.tag.id}-${item.source}`}>
+                          <TagLink
+                            className={`tag tag-${item.tag.category}${isStaff && item.rating_cue ? ` tag-rating-cue-${item.rating_cue}` : ""}`}
+                            href={`/?q=${encodeURIComponent(item.tag.name_normalized)}`}
+                            tagName={item.tag.name_normalized}
+                          >
+                            {item.tag.display_name}
+                          </TagLink>
+                          <span className="post-tag-meta">
+                            {item.is_manual ? "manual" : item.source}
+                            {item.confidence !== null ? ` · ${(item.confidence * 100).toFixed(0)}%` : ""}
+                          </span>
+                        </div>
+                      ))}
                     </div>
-                  ))}
+                  ) : (
+                    <p className="post-tag-collapsed-note">{group.tags.length} general tags hidden.</p>
+                  )}
                 </div>
-              </div>
-            ))}
+              );
+            })}
           </div>
         </section>
       </aside>
