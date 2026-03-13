@@ -20,6 +20,7 @@ type TagItem = {
     category: "general" | "character" | "copyright" | "meta" | "artist";
   };
   source: "auto" | "user" | "system";
+  confidence: number | null;
 };
 
 type ImageDetail = {
@@ -148,7 +149,13 @@ export default function AdminContentDetailPage() {
               imageId={image.id}
               onUpdated={loadAll}
               rating={image.rating}
-              tagNames={image.tags.map((item) => item.tag.name_normalized)}
+              tags={image.tags.map((item) => ({
+                name_normalized: item.tag.name_normalized,
+                display_name: item.tag.display_name,
+                category: item.tag.category,
+                source: item.source,
+                confidence: item.confidence,
+              }))}
               visibilityStatus={image.visibility_status}
             />
           </aside>
