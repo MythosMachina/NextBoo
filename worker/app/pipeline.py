@@ -17,6 +17,14 @@ from app.tagger import TagPrediction, Tagger, merge_predictions
 logger = logging.getLogger("worker.pipeline")
 
 
+class SourceFileMissingError(FileNotFoundError):
+    pass
+
+
+class AnalysisFrameGenerationError(RuntimeError):
+    pass
+
+
 @dataclass
 class ProcessedImage:
     image_id: str
@@ -134,10 +142,36 @@ def extract_frame_to_png(source_path: Path, target_path: Path, position_ratio: f
     if not target_path.exists():
         if source_path.suffix.lower() in {".gif", ".webp"}:
             return extract_frame_with_pillow(source_path, target_path, position_ratio)
-        raise FileNotFoundError(f"Expected extracted frame at {target_path}")
+        raise AnalysisFrameGenerationError(f"Expected extracted frame at {target_path}")
 
     with Image.open(target_path) as image:
         return image.width, image.height
+
+
+def extract_frame_to_png_with_retries(
+    source_path: Path,
+    target_path: Path,
+    position_ratio: float,
+    *,
+    max_attempts: int = 3,
+) -> tuple[int, int]:
+    last_error: Exception | None = None
+    for attempt in range(1, max_attempts + 1):
+        try:
+            target_path.unlink(missing_ok=True)
+            return extract_frame_to_png(source_path, target_path, position_ratio)
+        except AnalysisFrameGenerationError as exc:
+            last_error = exc
+            logger.warning(
+                "analysis frame generation retry source=%s frame=%s attempt=%s/%s",
+                source_path,
+                target_path.name,
+                attempt,
+                max_attempts,
+            )
+            target_path.unlink(missing_ok=True)
+            continue
+    raise AnalysisFrameGenerationError(str(last_error) if last_error else f"Expected extracted frame at {target_path}")
 
 
 def extract_mid_frame_with_pillow(source_path: Path, target_path: Path) -> tuple[int, int]:
@@ -340,7 +374,7 @@ def predict_existing_animated_or_video(
 
     for index, position_ratio in enumerate(frame_positions):
         frame_path = workdir / f"analysis_frame_{index}.png"
-        extract_frame_to_png(local_input, frame_path, position_ratio)
+        extract_frame_to_png_with_retries(local_input, frame_path, position_ratio)
         extracted_frames.append(frame_path)
         predictions.append(tagger.predict(frame_path))
 
@@ -359,6 +393,8 @@ def process_image(
 ) -> ProcessedImage:
     storage.ensure_dirs()
     source_path = Path(queue_path)
+    if not source_path.exists():
+        raise SourceFileMissingError(f"Missing source file at {source_path}")
     workdir = storage.job_workdir(job_id)
     workdir.mkdir(parents=True, exist_ok=True)
 

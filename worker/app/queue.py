@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Literal
 
 from app.db import get_connection
-from app.pipeline import ProcessedImage, process_image
+from app.pipeline import AnalysisFrameGenerationError, ProcessedImage, SourceFileMissingError, process_image
 from app.retag_existing import backfill_preview_variants, retag_existing
 from app.settings import get_settings
 from app.storage import StorageService
@@ -17,7 +17,8 @@ from redis import Redis
 logger = logging.getLogger("worker.queue")
 
 
-NON_RETRYABLE_EXCEPTIONS = (FileNotFoundError,)
+NON_RETRYABLE_EXCEPTIONS = (SourceFileMissingError,)
+TERMINAL_FAILURE_EXCEPTIONS = (AnalysisFrameGenerationError,)
 OUTCOME_STREAM_KEY = "nextboo:jobs:outcomes"
 OUTCOME_STREAM_LIMIT = 500
 
@@ -219,6 +220,13 @@ class WorkerService:
             source = Path(queue_path)
             if source.exists():
                 source.unlink()
+        except TERMINAL_FAILURE_EXCEPTIONS as exc:
+            self._register_terminal_failure(job, str(exc))
+            source = Path(queue_path)
+            if source.exists():
+                self.storage.move_to_failed(source)
+            logger.warning("marked terminal processing failure job_id=%s error=%s", job["id"], exc)
+            return
         except Exception as exc:
             if isinstance(exc, NON_RETRYABLE_EXCEPTIONS):
                 self._drop_job_with_audit(job, str(exc), event_type="file_missing")
@@ -617,6 +625,39 @@ class WorkerService:
                 )
                 self.redis.publish("jobs:events", json.dumps({"job_id": job["id"], "status": "failed"}))
                 return True
+
+    def _register_terminal_failure(self, job: dict, error_message: str) -> None:
+        with get_connection() as conn:
+            with conn.cursor() as cur:
+                next_retry = job["retry_count"] + 1
+                cur.execute(
+                    """
+                    UPDATE jobs
+                    SET status = 'FAILED'::job_status, retry_count = %s, last_error = %s, finished_at = NOW(), updated_at = NOW()
+                    WHERE id = %s
+                    """,
+                    (next_retry, error_message, job["id"]),
+                )
+                if job["import_batch_id"] is not None:
+                    cur.execute(
+                        """
+                        UPDATE imports
+                        SET failed_files = failed_files + 1,
+                            status = 'FAILED'::import_status,
+                            updated_at = NOW()
+                        WHERE id = %s
+                        """,
+                        (job["import_batch_id"],),
+                    )
+                conn.commit()
+                self._record_outcome(
+                    outcome="failed",
+                    job_id=job["id"],
+                    import_batch_id=job["import_batch_id"],
+                    message=error_message,
+                    image_id=None,
+                )
+                self.redis.publish("jobs:events", json.dumps({"job_id": job["id"], "status": "failed"}))
 
     def _register_near_duplicates(self, cur, processed: ProcessedImage) -> None:
         if not processed.perceptual_hash:
