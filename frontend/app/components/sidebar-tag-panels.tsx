@@ -57,8 +57,8 @@ function parseRatingParam(value: string | null): "general" | "sensitive" | "ques
   return "all";
 }
 
-function parseMediaTypeParam(value: string | null): "all" | "image" | "animated" {
-  if (value === "image" || value === "animated") {
+function parseMediaTypeParam(value: string | null): "all" | "image" | "animated" | "video" {
+  if (value === "image" || value === "animated" || value === "video") {
     return value;
   }
   return "all";
@@ -70,7 +70,7 @@ function stripLegacyFilterTokens(query: string): string {
     .map((token) => token.trim())
     .filter(Boolean)
     .filter((token) => !token.startsWith("rating:"))
-    .filter((token) => token !== "image" && token !== "animated")
+    .filter((token) => token !== "image" && token !== "animated" && token !== "video")
     .join(" ");
 }
 

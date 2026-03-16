@@ -6,6 +6,7 @@ from app.core.security import hash_password
 from app.models.invite import UserInvite, UserStrike
 from app.models.user import User
 from app.services.admin_users import ban_user_email, email_is_banned
+from app.services.app_settings import get_terms_of_service
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
@@ -94,8 +95,22 @@ def create_admin_bootstrap_invite(
     return invite
 
 
-def redeem_invite(db: Session, *, code: str, email: str, username: str, password: str) -> User:
+def redeem_invite(
+    db: Session,
+    *,
+    code: str,
+    email: str,
+    username: str,
+    password: str,
+    accepted_tos: bool,
+    tos_version: str,
+) -> User:
     normalized_email = normalize_email(email)
+    current_tos = get_terms_of_service(db)
+    if not accepted_tos:
+        raise ValueError("Terms of Service must be accepted")
+    if tos_version.strip() != current_tos["version"]:
+        raise ValueError("Terms of Service changed. Please review and accept the latest version.")
     invite = db.query(UserInvite).filter(UserInvite.code == code, UserInvite.status == InviteStatus.PENDING).first()
     if not invite:
         raise ValueError("Invite code is invalid")
@@ -130,6 +145,8 @@ def redeem_invite(db: Session, *, code: str, email: str, username: str, password
         can_upload=can_upload,
         can_view_questionable=True,
         can_view_explicit=can_view_explicit,
+        accepted_tos_at=datetime.now(timezone.utc),
+        accepted_tos_version=str(current_tos["version"]),
     )
     db.add(user)
     db.flush()

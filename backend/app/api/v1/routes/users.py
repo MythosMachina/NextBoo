@@ -1,13 +1,18 @@
+from pathlib import Path
 from typing import Annotated
 
-from app.api.deps import DbSession, get_current_user, get_optional_current_user, require_roles
+from app.api.deps import DbSession, get_current_user, get_current_user_raw, get_optional_current_user, require_roles
 from app.core.constants import ProcessingStatus, Rating, UserRole
 from app.core.security import hash_password, verify_password
+from app.models.backup_export import BackupExport
 from app.models.image import Image
 from app.models.user import User
 from app.schemas.user import (
     AdminUserBan,
     AdminUserPasswordReset,
+    BackupDownloadsEnvelope,
+    BackupExportItem,
+    BackupImageItem,
     PublicUserProfileEnvelope,
     PublicUserProfileImage,
     PublicUserResponse,
@@ -19,13 +24,16 @@ from app.schemas.user import (
     UsersEnvelope,
 )
 from app.services.admin_users import email_is_banned, generate_temp_password
-from app.services.media import thumb_url_for_image
+from app.services.backup_exports import EXPORT_ROOT, list_backup_exports_for_user, queue_backup_export, reactivate_tos_account
+from app.services.media import build_media_url, thumb_url_for_image
 from app.services.social_gate import ban_user_with_enforcement, can_manage_target, count_used_invites, count_user_strikes
+from app.services.tos import get_current_tos_version, user_requires_tos_acceptance
 from app.services.deletion import hard_delete_image
 from app.services.storage_sanitation import sanitize_gallery_storage
 from app.services.user_preferences import parse_user_tag_blacklist, serialize_tag_blacklist
 from app.services.visibility import apply_public_image_visibility, resolve_visibility_status
 from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi.responses import FileResponse
 from sqlalchemy.orm import Session, selectinload
 
 
@@ -39,9 +47,15 @@ def _normalize_email(value: str | None) -> str | None:
     return normalized or None
 
 
+def _require_tos_backup_user(current_user: User) -> None:
+    if current_user.role != UserRole.TOS_DEACTIVATED:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Backup downloads are only available in Terms of Service backup-only mode")
+
+
 def _build_user_response(db: Session, user: User) -> UserResponse:
     invite_slots_used = count_used_invites(db, user.id)
     strike_count = count_user_strikes(db, user.id)
+    current_tos_version = get_current_tos_version(db)
     return UserResponse(
         id=user.id,
         username=user.username,
@@ -58,6 +72,11 @@ def _build_user_response(db: Session, user: User) -> UserResponse:
         can_view_questionable=user.can_view_questionable,
         can_view_explicit=user.can_view_explicit,
         tag_blacklist=parse_user_tag_blacklist(user),
+        requires_tos_acceptance=user_requires_tos_acceptance(db, user),
+        accepted_tos_version=user.accepted_tos_version,
+        current_tos_version=current_tos_version,
+        tos_declined_at=user.tos_declined_at.isoformat() if user.tos_declined_at else None,
+        tos_delete_after_at=user.tos_delete_after_at.isoformat() if user.tos_delete_after_at else None,
     )
 
 
@@ -131,6 +150,94 @@ def get_my_uploads(
         data=PublicUserResponse.model_validate(current_user),
         uploads=upload_items,
         meta={"count": len(upload_items), "limit": limit},
+    )
+
+
+@router.get("/me/backup", response_model=BackupDownloadsEnvelope)
+def get_my_backup_downloads(
+    db: DbSession,
+    current_user: Annotated[User, Depends(get_current_user_raw)],
+    limit: int = Query(default=500, ge=1, le=2000),
+) -> BackupDownloadsEnvelope:
+    _require_tos_backup_user(current_user)
+    uploads = (
+        db.query(Image)
+        .options(selectinload(Image.variants))
+        .filter(Image.uploaded_by_user_id == current_user.id)
+        .filter(Image.processing_status == ProcessingStatus.READY)
+        .order_by(Image.created_at.desc())
+        .limit(limit)
+        .all()
+    )
+    items: list[BackupImageItem] = []
+    for image in uploads:
+        original_variant = next((variant for variant in image.variants if variant.variant_type.value == "original"), None)
+        items.append(
+            BackupImageItem(
+                id=image.id,
+                uuid_short=image.uuid_short,
+                original_filename=image.original_filename,
+                created_at=image.created_at,
+                rating=image.rating,
+                original_download_url=build_media_url(original_variant.relative_path) if original_variant else None,
+            )
+        )
+    exports = [
+        BackupExportItem(
+            id=export.id,
+            status=export.status,
+            created_at=export.created_at,
+            started_at=export.started_at,
+            finished_at=export.finished_at,
+            file_size=export.file_size,
+            item_count=export.item_count,
+            current_message=export.current_message,
+            error_summary=export.error_summary,
+            download_url=f"/api/v1/users/me/backup/exports/{export.id}/download"
+            if export.status == "done" and export.zip_relative_path
+            else None,
+        )
+        for export in list_backup_exports_for_user(db, current_user)
+    ]
+    return BackupDownloadsEnvelope(
+        data=items,
+        exports=exports,
+        meta={"count": len(items), "limit": limit, "export_count": len(exports)},
+    )
+
+
+@router.post("/me/backup/exports", response_model=BackupDownloadsEnvelope)
+def create_my_backup_export(
+    db: DbSession,
+    current_user: Annotated[User, Depends(get_current_user_raw)],
+) -> BackupDownloadsEnvelope:
+    _require_tos_backup_user(current_user)
+    export, created = queue_backup_export(db, current_user)
+    uploads_envelope = get_my_backup_downloads(db, current_user, limit=500)
+    uploads_envelope.meta["queued_export_id"] = export.id
+    uploads_envelope.meta["queued"] = 1 if created else 0
+    return uploads_envelope
+
+
+@router.get("/me/backup/exports/{export_id}/download")
+def download_my_backup_export(
+    export_id: int,
+    db: DbSession,
+    current_user: Annotated[User, Depends(get_current_user_raw)],
+):
+    _require_tos_backup_user(current_user)
+    export = db.get(BackupExport, export_id)
+    if not export or export.user_id != current_user.id:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Backup export not found")
+    if export.status != "done" or not export.zip_relative_path:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Backup export is not ready")
+    archive_path = EXPORT_ROOT / Path(export.zip_relative_path).name
+    if not archive_path.exists():
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Backup archive is missing")
+    return FileResponse(
+        archive_path,
+        media_type="application/zip",
+        filename=archive_path.name,
     )
 
 
@@ -310,3 +417,16 @@ def purge_user_content(
     sanitize_gallery_storage(db)
     db.commit()
     return {"data": {"status": "purged", "removed_images": removed}, "meta": {}}
+
+
+@router.post("/{user_id}/reactivate-tos", response_model=UserResponse)
+def reactivate_tos_user(
+    user_id: int,
+    db: DbSession,
+    _: Annotated[User, Depends(require_roles(UserRole.ADMIN))],
+) -> UserResponse:
+    user = db.get(User, user_id)
+    if not user:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
+    user = reactivate_tos_account(db, user)
+    return _build_user_response(db, user)

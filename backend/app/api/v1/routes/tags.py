@@ -2,26 +2,43 @@ import json
 import logging
 import threading
 import time
+from datetime import datetime, timezone
 from types import SimpleNamespace
 from typing import Annotated
 
-from app.api.deps import DbSession, RedisClient, get_optional_current_user
-from app.core.constants import ProcessingStatus, SYSTEM_TAGS, TagCategory
+from app.api.deps import DbSession, RedisClient, get_current_user, get_optional_current_user, require_roles
+from app.core.constants import ProcessingStatus, SYSTEM_TAGS, TagCategory, UserRole
 from app.db.session import get_redis_client
 from app.db.session import engine as db_engine
 from app.models.image import Image, ImageTag
-from app.models.tag import Tag, TagAlias
+from app.models.tag import DangerTag, Tag, TagAlias, TagMerge
 from app.models.user import User
+from app.schemas.tag_admin import DangerTagEnvelope, DangerTagRead, DangerTagUpsert, TagAdminEnvelope, TagAdminRead, TagAliasUpsert, TagMergePayload, TagUpdatePayload
 from app.services.app_settings import get_sidebar_limits
+from app.services.tag_governance import is_name_pattern_tag
+from app.services.rate_limits import enforce_rate_limit
 from app.services.search import normalize_tag_token, parse_media_type_filter, parse_rating_filter, parse_search_query
 from app.services.visibility import apply_public_image_visibility
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, Query, Request
 from redis.exceptions import RedisError
 from sqlalchemy import and_, desc, func, not_, or_
 from sqlalchemy.orm import Session
 
 
 router = APIRouter(prefix="/tags")
+
+
+def get_or_create_tag(db: DbSession, tag_name: str) -> Tag:
+    normalized = normalize_tag_token(tag_name)
+    if not normalized:
+        raise ValueError("Tag must not be empty")
+    existing = db.query(Tag).filter(Tag.name_normalized == normalized).first()
+    if existing:
+        return existing
+    tag = Tag(name_normalized=normalized, display_name=normalized, category=TagCategory.GENERAL)
+    db.add(tag)
+    db.flush()
+    return tag
 
 DEFAULT_BROWSER_OPEN_NAMESPACES = {"character", "general"}
 CACHE_REGISTRY_KEY = "nextboo:tags:sidebar:registry"
@@ -452,6 +469,221 @@ def autocomplete_tags(
         ],
         "meta": {"count": len(tags), "query": q},
     }
+
+
+@router.get("/admin/list", response_model=TagAdminEnvelope)
+def admin_list_tags(
+    db: DbSession,
+    _: Annotated[User, Depends(require_roles(UserRole.ADMIN, UserRole.MODERATOR))],
+    q: str = Query(default=""),
+    limit: int = Query(default=200, ge=1, le=500),
+) -> TagAdminEnvelope:
+    image_count = func.count(func.distinct(ImageTag.image_id))
+    alias_count = func.count(func.distinct(TagAlias.id))
+    query = (
+        db.query(Tag, image_count.label("image_count"), alias_count.label("alias_count"))
+        .outerjoin(ImageTag, ImageTag.tag_id == Tag.id)
+        .outerjoin(TagAlias, TagAlias.target_tag_id == Tag.id)
+        .group_by(Tag.id)
+    )
+    if q.strip():
+        normalized = normalize_tag_token(q)
+        query = query.filter(or_(Tag.name_normalized.ilike(f"%{normalized}%"), Tag.display_name.ilike(f"%{q.strip()}%")))
+    rows = query.order_by(image_count.desc(), Tag.name_normalized.asc()).limit(limit).all()
+    return TagAdminEnvelope(
+        data=[
+            TagAdminRead(
+                id=tag.id,
+                name_normalized=tag.name_normalized,
+                display_name=tag.display_name,
+                category=tag.category,
+                is_active=tag.is_active,
+                is_locked=tag.is_locked,
+                alias_count=int(alias_count_value or 0),
+                image_count=int(image_count_value or 0),
+                is_name_pattern=is_name_pattern_tag(tag),
+            )
+            for tag, image_count_value, alias_count_value in rows
+        ],
+        meta={"count": len(rows), "query": q},
+    )
+
+
+@router.patch("/admin/{tag_id}")
+def admin_update_tag(
+    tag_id: int,
+    payload: TagUpdatePayload,
+    db: DbSession,
+    redis_client: RedisClient,
+    request: Request,
+    current_user: Annotated[User, Depends(require_roles(UserRole.ADMIN, UserRole.MODERATOR))],
+) -> dict:
+    enforce_rate_limit(db, redis_client, request, "admin_write", current_user=current_user)
+    tag = db.get(Tag, tag_id)
+    if not tag:
+        return {"data": {"status": "not_found"}, "meta": {"tag_id": tag_id}}
+    if payload.display_name is not None:
+        tag.display_name = payload.display_name.strip() or tag.display_name
+    if payload.category is not None:
+        tag.category = payload.category
+    if payload.is_active is not None:
+        tag.is_active = payload.is_active
+    if payload.is_locked is not None:
+        tag.is_locked = payload.is_locked
+    db.add(tag)
+    db.commit()
+    return {"data": {"status": "updated", "tag_id": tag.id}, "meta": {}}
+
+
+@router.post("/admin/alias")
+def admin_upsert_alias(
+    payload: TagAliasUpsert,
+    db: DbSession,
+    redis_client: RedisClient,
+    request: Request,
+    current_user: Annotated[User, Depends(require_roles(UserRole.ADMIN, UserRole.MODERATOR))],
+) -> dict:
+    enforce_rate_limit(db, redis_client, request, "admin_write", current_user=current_user)
+    target_tag = get_or_create_tag(db, payload.target_tag_name)
+    alias_name = normalize_tag_token(payload.alias_name)
+    alias = db.query(TagAlias).filter(TagAlias.alias_name == alias_name).first()
+    if alias is None:
+        alias = TagAlias(alias_name=alias_name, target_tag_id=target_tag.id, alias_type=payload.alias_type)
+    else:
+        alias.target_tag_id = target_tag.id
+        alias.alias_type = payload.alias_type
+    db.add(alias)
+    db.commit()
+    return {"data": {"status": "saved", "alias_name": alias_name, "target_tag": target_tag.name_normalized}, "meta": {}}
+
+
+@router.post("/admin/merge")
+def admin_merge_tags(
+    payload: TagMergePayload,
+    db: DbSession,
+    redis_client: RedisClient,
+    request: Request,
+    current_user: Annotated[User, Depends(get_current_user)],
+) -> dict:
+    if current_user.role not in {UserRole.ADMIN, UserRole.MODERATOR}:
+        return {"data": {"status": "forbidden"}, "meta": {}}
+    enforce_rate_limit(db, redis_client, request, "admin_write", current_user=current_user)
+    source_tag = db.query(Tag).filter(Tag.name_normalized == normalize_tag_token(payload.source_tag_name)).first()
+    target_tag = get_or_create_tag(db, payload.target_tag_name)
+    if not source_tag:
+        return {"data": {"status": "source_not_found"}, "meta": {}}
+    if source_tag.id == target_tag.id:
+        return {"data": {"status": "noop"}, "meta": {}}
+
+    source_links = db.query(ImageTag).filter(ImageTag.tag_id == source_tag.id).all()
+    for link in source_links:
+        existing = (
+            db.query(ImageTag)
+            .filter(
+                ImageTag.image_id == link.image_id,
+                ImageTag.tag_id == target_tag.id,
+                ImageTag.source == link.source,
+            )
+            .first()
+        )
+        if existing:
+            if existing.confidence is None or (link.confidence is not None and link.confidence > existing.confidence):
+                existing.confidence = link.confidence
+                db.add(existing)
+            db.delete(link)
+        else:
+            link.tag_id = target_tag.id
+            db.add(link)
+
+    for alias in db.query(TagAlias).filter(TagAlias.target_tag_id == source_tag.id).all():
+        alias.target_tag_id = target_tag.id
+        db.add(alias)
+    if not db.query(TagAlias).filter(TagAlias.alias_name == source_tag.name_normalized).first():
+        db.add(TagAlias(alias_name=source_tag.name_normalized, target_tag_id=target_tag.id))
+
+    source_danger = db.query(DangerTag).filter(DangerTag.tag_id == source_tag.id).first()
+    if source_danger:
+        existing_danger = db.query(DangerTag).filter(DangerTag.tag_id == target_tag.id).first()
+        if existing_danger:
+            db.delete(source_danger)
+        else:
+            source_danger.tag_id = target_tag.id
+            db.add(source_danger)
+
+    db.add(
+        TagMerge(
+            source_tag_id=source_tag.id,
+            target_tag_id=target_tag.id,
+            merged_by_user_id=current_user.id,
+            merged_at=datetime.now(timezone.utc),
+            reason=payload.reason,
+        )
+    )
+    db.delete(source_tag)
+    db.commit()
+    return {"data": {"status": "merged", "source_tag": payload.source_tag_name, "target_tag": target_tag.name_normalized}, "meta": {}}
+
+
+@router.get("/admin/danger-tags", response_model=DangerTagEnvelope)
+def list_danger_tags(
+    db: DbSession,
+    _: Annotated[User, Depends(require_roles(UserRole.ADMIN, UserRole.MODERATOR))],
+) -> DangerTagEnvelope:
+    rows = db.query(DangerTag, Tag).join(Tag, Tag.id == DangerTag.tag_id).order_by(Tag.name_normalized.asc()).all()
+    return DangerTagEnvelope(
+        data=[
+            DangerTagRead(
+                id=rule.id,
+                tag_id=tag.id,
+                tag_name=tag.name_normalized,
+                display_name=tag.display_name,
+                reason=rule.reason,
+                is_enabled=rule.is_enabled,
+                created_at=rule.created_at,
+            )
+            for rule, tag in rows
+        ],
+        meta={"count": len(rows)},
+    )
+
+
+@router.put("/admin/danger-tags")
+def upsert_danger_tag(
+    payload: DangerTagUpsert,
+    db: DbSession,
+    redis_client: RedisClient,
+    request: Request,
+    current_user: Annotated[User, Depends(get_current_user)],
+) -> dict:
+    if current_user.role not in {UserRole.ADMIN, UserRole.MODERATOR}:
+        return {"data": {"status": "forbidden"}, "meta": {}}
+    enforce_rate_limit(db, redis_client, request, "admin_write", current_user=current_user)
+    tag = get_or_create_tag(db, payload.tag_name)
+    rule = db.query(DangerTag).filter(DangerTag.tag_id == tag.id).first()
+    if rule is None:
+        rule = DangerTag(tag_id=tag.id, created_by_user_id=current_user.id)
+    rule.reason = payload.reason.strip() if payload.reason else None
+    rule.is_enabled = payload.is_enabled
+    db.add(rule)
+    db.commit()
+    return {"data": {"status": "saved", "tag_name": tag.name_normalized}, "meta": {}}
+
+
+@router.delete("/admin/danger-tags/{danger_tag_id}")
+def delete_danger_tag(
+    danger_tag_id: int,
+    db: DbSession,
+    redis_client: RedisClient,
+    request: Request,
+    current_user: Annotated[User, Depends(require_roles(UserRole.ADMIN, UserRole.MODERATOR))],
+) -> dict:
+    enforce_rate_limit(db, redis_client, request, "admin_write", current_user=current_user)
+    rule = db.get(DangerTag, danger_tag_id)
+    if not rule:
+        return {"data": {"status": "not_found"}, "meta": {"danger_tag_id": danger_tag_id}}
+    db.delete(rule)
+    db.commit()
+    return {"data": {"status": "deleted"}, "meta": {}}
 
 
 @router.get("")

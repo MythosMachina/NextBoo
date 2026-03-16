@@ -6,7 +6,9 @@ from app.models.invite import UserInvite
 from app.models.user import User
 from app.schemas.auth import LoginResponse, TokenResponse
 from app.schemas.invite import InviteCreate, InviteDashboard, InviteDashboardEnvelope, InviteRedeem, InviteResponse
+from app.schemas.app_settings import TermsOfServiceRead, TermsOfServiceResponse
 from app.services.auth import build_token_response
+from app.services.app_settings import get_terms_of_service, update_terms_of_service
 from app.services.social_gate import (
     count_used_invites,
     create_invite,
@@ -36,6 +38,11 @@ def _build_invite_response(invite: UserInvite) -> InviteResponse:
         revoked_at=invite.revoked_at,
         rehabilitated_at=invite.rehabilitated_at,
     )
+
+
+@router.get("/tos", response_model=TermsOfServiceResponse)
+def get_public_terms_of_service(db: DbSession) -> TermsOfServiceResponse:
+    return TermsOfServiceResponse(data=TermsOfServiceRead(**get_terms_of_service(db)), meta={})
 
 
 @router.get("/me", response_model=InviteDashboardEnvelope)
@@ -161,6 +168,8 @@ def redeem_user_invite(payload: InviteRedeem, db: DbSession) -> LoginResponse:
             email=payload.email,
             username=payload.username,
             password=payload.password,
+            accepted_tos=payload.accepted_tos,
+            tos_version=payload.tos_version,
         )
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc

@@ -14,6 +14,8 @@ class InviteRedeem(BaseModel):
     email: EmailStr
     username: str
     password: str
+    accepted_tos: bool
+    tos_version: str
 
 
 class InviteResponse(BaseModel):

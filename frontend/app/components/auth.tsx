@@ -13,7 +13,7 @@ export type SessionUser = {
   id: number;
   username: string;
   email: string | null;
-  role: "admin" | "moderator" | "uploader";
+  role: "admin" | "moderator" | "uploader" | "tos_deactivated";
   is_active: boolean;
   can_upload: boolean;
   invite_quota: number;
@@ -24,6 +24,11 @@ export type SessionUser = {
   can_view_questionable: boolean;
   can_view_explicit: boolean;
   tag_blacklist: string[];
+  requires_tos_acceptance: boolean;
+  accepted_tos_version: string | null;
+  current_tos_version: string | null;
+  tos_declined_at: string | null;
+  tos_delete_after_at: string | null;
 };
 
 type AuthContextValue = {
@@ -34,6 +39,8 @@ type AuthContextValue = {
   isModerator: boolean;
   isStaff: boolean;
   canUpload: boolean;
+  isTosDeactivated: boolean;
+  requiresTosAcceptance: boolean;
   setSession: (user: SessionUser | null) => void;
   clearSession: () => void;
 };
@@ -242,7 +249,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         isAdmin: user?.role === "admin",
         isModerator: user?.role === "moderator",
         isStaff: user?.role === "admin" || user?.role === "moderator",
-        canUpload: Boolean(user?.can_upload || user?.role === "admin" || user?.role === "moderator"),
+        canUpload: Boolean((user?.can_upload || user?.role === "admin" || user?.role === "moderator") && user?.role !== "tos_deactivated"),
+        isTosDeactivated: user?.role === "tos_deactivated",
+        requiresTosAcceptance: Boolean(user?.requires_tos_acceptance),
         setSession,
         clearSession
       }}

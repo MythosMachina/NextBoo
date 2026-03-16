@@ -4,6 +4,13 @@ set -eu
 ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
 cd "$ROOT_DIR"
 
+if [ -f .env ]; then
+  # shellcheck disable=SC1091
+  . ./.env
+fi
+
+FRONTEND_PORT="${FRONTEND_PORT:-13000}"
+
 if ! docker compose ps backend >/dev/null 2>&1; then
   echo "Backend service is not available. Start the stack first with: docker compose up -d"
   exit 1
@@ -19,6 +26,6 @@ CODE="$(docker compose exec -T backend python -m app.cli.admin_access bootstrap-
 
 echo
 echo "Bootstrap admin invite created."
-echo "Redeem it at: http://localhost:13000/invite"
+echo "Redeem it at: http://localhost:${FRONTEND_PORT}/invite"
 echo "Invite code: $CODE"
 echo

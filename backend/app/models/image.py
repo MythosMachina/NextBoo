@@ -24,6 +24,11 @@ class Image(TimestampMixin, Base):
     perceptual_hash: Mapped[str | None] = mapped_column(String(64), index=True, nullable=True)
     width: Mapped[int] = mapped_column(Integer, nullable=False)
     height: Mapped[int] = mapped_column(Integer, nullable=False)
+    duration_seconds: Mapped[float | None] = mapped_column(Float, nullable=True)
+    frame_rate: Mapped[float | None] = mapped_column(Float, nullable=True)
+    has_audio: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    video_codec: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    audio_codec: Mapped[str | None] = mapped_column(String(64), nullable=True)
     aspect_ratio: Mapped[float] = mapped_column(Numeric(10, 4), nullable=False)
     storage_ext: Mapped[str] = mapped_column(String(16), default="png", nullable=False)
     rating: Mapped[Rating] = mapped_column(Enum(Rating, name="rating"), default=Rating.GENERAL, nullable=False)
@@ -49,6 +54,7 @@ class Image(TimestampMixin, Base):
     tags = relationship("ImageTag", back_populates="image", cascade="all, delete-orphan")
     moderation = relationship("ImageModeration", back_populates="image", cascade="all, delete-orphan", uselist=False)
     reports = relationship("ImageReport", back_populates="image", cascade="all, delete-orphan")
+    comments = relationship("ImageComment", back_populates="image", cascade="all, delete-orphan")
 
 
 class ImageVariant(Base):

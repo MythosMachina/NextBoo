@@ -23,6 +23,14 @@ class User(TimestampMixin, Base):
     can_view_explicit: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     tag_blacklist: Mapped[str] = mapped_column(Text, default="", nullable=False)
     last_login_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    accepted_tos_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    accepted_tos_version: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    tos_declined_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    tos_delete_after_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    tos_restore_role: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    tos_restore_can_upload: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    tos_restore_can_view_questionable: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    tos_restore_can_view_explicit: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
 
     uploads = relationship("Image", back_populates="uploaded_by")
     invited_by = relationship("User", remote_side=[id], back_populates="invitees", foreign_keys=[invited_by_user_id])
@@ -31,6 +39,7 @@ class User(TimestampMixin, Base):
     received_strikes = relationship("UserStrike", back_populates="target_user", foreign_keys="UserStrike.target_user_id")
     issued_strikes = relationship("UserStrike", back_populates="issued_by_user", foreign_keys="UserStrike.issued_by_user_id")
     related_strikes = relationship("UserStrike", back_populates="related_user", foreign_keys="UserStrike.related_user_id")
+    image_comments = relationship("ImageComment", back_populates="user")
 
 
 class BannedEmail(TimestampMixin, Base):

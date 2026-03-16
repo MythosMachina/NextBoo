@@ -28,6 +28,7 @@ class ParsedSearchQuery:
 MEDIA_TYPE_ALIASES = {
     "image": "image",
     "animated": "animated",
+    "video": "video",
 }
 
 

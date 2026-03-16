@@ -1,5 +1,6 @@
 import json
 import logging
+import threading
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Literal
@@ -36,6 +37,9 @@ DEFAULT_RATING_RULE_BOOSTS = {
 
 AUTO_TAG_SOURCE_ENUM = "AUTO"
 SYSTEM_TAG_SOURCE_ENUM = "SYSTEM"
+VISIBLE_STATUS_ENUM = "VISIBLE"
+HIDDEN_STATUS_ENUM = "HIDDEN"
+NEAR_DUPLICATE_STATUS_OPEN = "open"
 
 MaintenanceAction = Literal["retag_all"]
 
@@ -58,6 +62,13 @@ class WorkerService:
             self.tagger = build_tagger()
         self.worker_id = f"worker-{Path('/etc/hostname').read_text().strip() if Path('/etc/hostname').exists() else 'local'}"
 
+    def touch_worker_presence(self) -> None:
+        self.redis.set(
+            f"nextboo:workers:active:{self.worker_id}",
+            datetime.now(timezone.utc).isoformat(),
+            ex=self.settings.worker_presence_ttl_seconds,
+        )
+
     def poll_job(self, timeout_seconds: int = 5) -> tuple[str, int | dict[str, object]] | None:
         item = self.redis.blpop([self.settings.maintenance_queue_name, self.settings.ingest_queue_name], timeout=timeout_seconds)
         if not item:
@@ -69,8 +80,10 @@ class WorkerService:
 
     def run_forever(self) -> None:
         self.storage.ensure_dirs()
+        self.touch_worker_presence()
         self.recover_stale_jobs(reason="startup")
         while True:
+            self.touch_worker_presence()
             item = self.poll_job()
             if item is None:
                 self.recover_stale_jobs(reason="idle")
@@ -189,6 +202,14 @@ class WorkerService:
             return
 
         queue_path = job["queue_path"]
+        heartbeat_stop = threading.Event()
+        heartbeat_thread = threading.Thread(
+            target=self._heartbeat_job,
+            args=(job["id"], heartbeat_stop),
+            daemon=True,
+            name=f"job-heartbeat-{job['id']}",
+        )
+        heartbeat_thread.start()
         try:
             processed = process_image(job_id, queue_path, self.settings.thumb_max_edge, self.storage, self.tagger)
             self._register_success(job, processed)
@@ -209,7 +230,27 @@ class WorkerService:
                 self.storage.move_to_failed(source)
             raise
         finally:
+            heartbeat_stop.set()
+            heartbeat_thread.join(timeout=1)
             self.storage.remove_job_workdir(job_id)
+
+    def _heartbeat_job(self, job_id: int, stop_event: threading.Event) -> None:
+        while not stop_event.wait(self.settings.job_heartbeat_seconds):
+            try:
+                with get_connection() as conn:
+                    with conn.cursor() as cur:
+                        cur.execute(
+                            """
+                            UPDATE jobs
+                            SET locked_at = NOW(), updated_at = NOW()
+                            WHERE id = %s AND status = 'RUNNING'::job_status
+                            """,
+                            (job_id,),
+                        )
+                        conn.commit()
+                self.touch_worker_presence()
+            except Exception:
+                logger.exception("failed to heartbeat running job job_id=%s", job_id)
 
     def _register_success(self, job: dict, processed: ProcessedImage) -> None:
         with get_connection() as conn:
@@ -256,11 +297,13 @@ class WorkerService:
                     INSERT INTO images (
                         id, uuid_short, original_filename, mime_type_original, file_size_original,
                         file_size_stored, checksum_sha256, perceptual_hash, width, height,
+                        duration_seconds, frame_rate, has_audio, video_codec, audio_codec,
                         aspect_ratio, storage_ext, rating, nsfw_score, source_type, source_path,
                         uploaded_by_user_id, import_batch_id,
                         processing_status, processing_error, auto_model_version, nsfw_model_version,
                         created_at, imported_at, processed_at, updated_at
                     ) VALUES (
+                        %s, %s, %s, %s, %s,
                         %s, %s, %s, %s, %s,
                         %s, %s, %s, %s, %s,
                         %s, %s, %s::rating, %s, 'web', %s,
@@ -280,6 +323,11 @@ class WorkerService:
                         processed.perceptual_hash,
                         processed.width,
                         processed.height,
+                        processed.duration_seconds,
+                        processed.frame_rate,
+                        processed.has_audio,
+                        processed.video_codec,
+                        processed.audio_codec,
                         processed.aspect_ratio,
                         processed.storage_ext,
                         processed.tag_prediction.rating.upper(),
@@ -313,6 +361,8 @@ class WorkerService:
                     ),
                 )
                 self._upsert_tags(cur, processed)
+                self._apply_danger_tags(cur, processed)
+                self._register_near_duplicates(cur, processed)
                 if job["import_batch_id"] is not None:
                     cur.execute(
                         """
@@ -454,6 +504,53 @@ class WorkerService:
                 (processed.image_id, row["id"]),
             )
 
+    def _apply_danger_tags(self, cur, processed: ProcessedImage) -> None:
+        present_tags = (
+            set(processed.tag_prediction.general_tags)
+            | set(processed.tag_prediction.character_tags)
+            | set(processed.tag_prediction.copyright_tags)
+            | set(processed.tag_prediction.artist_tags)
+            | set(processed.tag_prediction.meta_tags)
+        )
+        if not present_tags:
+            return
+        cur.execute(
+            """
+            SELECT d.id, d.reason, t.id AS tag_id, t.name_normalized
+            FROM danger_tags d
+            JOIN tags t ON t.id = d.tag_id
+            WHERE d.is_enabled = TRUE
+            """
+        )
+        rows = cur.fetchall()
+        hits = [row for row in rows if row["name_normalized"] in present_tags]
+        if not hits:
+            return
+        cur.execute(
+            f"""
+            INSERT INTO image_moderation (image_id, visibility_status, reason, note, acted_by_user_id, acted_at)
+            VALUES (%s, '{HIDDEN_STATUS_ENUM}'::visibility_status, %s, %s, NULL, NOW())
+            ON CONFLICT (image_id)
+            DO UPDATE SET visibility_status = '{HIDDEN_STATUS_ENUM}'::visibility_status,
+                          reason = EXCLUDED.reason,
+                          note = EXCLUDED.note,
+                          acted_at = NOW()
+            """,
+            (
+                processed.image_id,
+                "danger_tag_auto_hold",
+                ", ".join(sorted({row["name_normalized"] for row in hits})),
+            ),
+        )
+        for row in hits:
+            cur.execute(
+                """
+                INSERT INTO image_danger_hits (image_id, tag_id, created_at, reason)
+                VALUES (%s, %s, NOW(), %s)
+                """,
+                (processed.image_id, row["tag_id"], row["reason"]),
+            )
+
     def _register_failure(self, job: dict, error_message: str) -> bool:
         with get_connection() as conn:
             with conn.cursor() as cur:
@@ -500,6 +597,61 @@ class WorkerService:
                 )
                 self.redis.publish("jobs:events", json.dumps({"job_id": job["id"], "status": "failed"}))
                 return True
+
+    def _register_near_duplicates(self, cur, processed: ProcessedImage) -> None:
+        if not processed.perceptual_hash:
+            return
+        cur.execute("SELECT value FROM app_settings WHERE key = 'near_duplicate_hamming_threshold' LIMIT 1")
+        row = cur.fetchone()
+        try:
+            threshold = max(int(row["value"]) if row else 6, 1)
+        except (TypeError, ValueError):
+            threshold = 6
+
+        cur.execute(
+            """
+            SELECT id, perceptual_hash
+            FROM images
+            WHERE id != %s
+              AND perceptual_hash IS NOT NULL
+              AND LENGTH(perceptual_hash) = %s
+            """,
+            (processed.image_id, len(processed.perceptual_hash)),
+        )
+        candidates = cur.fetchall()
+        for candidate in candidates:
+            distance = sum(
+                1
+                for left, right in zip(processed.perceptual_hash, candidate["perceptual_hash"], strict=False)
+                if left != right
+            )
+            if distance > threshold:
+                continue
+            left_id = min(processed.image_id, candidate["id"])
+            right_id = max(processed.image_id, candidate["id"])
+            cur.execute(
+                """
+                SELECT id
+                FROM near_duplicate_reviews
+                WHERE image_id = %s AND similar_image_id = %s
+                """,
+                (left_id, right_id),
+            )
+            if cur.fetchone():
+                continue
+            cur.execute(
+                """
+                INSERT INTO near_duplicate_reviews (
+                    image_id,
+                    similar_image_id,
+                    hamming_distance,
+                    status,
+                    created_at,
+                    updated_at
+                ) VALUES (%s, %s, %s, %s, NOW(), NOW())
+                """,
+                (left_id, right_id, distance, NEAR_DUPLICATE_STATUS_OPEN),
+            )
 
     def _drop_job_with_audit(self, job: dict, message: str, event_type: str, cur=None) -> None:
         if cur is None:

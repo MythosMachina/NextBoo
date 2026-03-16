@@ -1,8 +1,16 @@
 "use client";
 
-import { FormEvent, useState } from "react";
+import Link from "next/link";
+import { FormEvent, useEffect, useState } from "react";
 import { fetchCurrentUser, storeTokens, storeUser, useAuthState } from "../components/auth";
 import { getBrowserApiBaseUrl } from "../lib/public-api";
+
+type TermsOfService = {
+  title: string;
+  version: string;
+  paragraphs: string[];
+  updated_at: string | null;
+};
 
 export default function InviteRedeemPage() {
   const { setSession } = useAuthState();
@@ -11,15 +19,35 @@ export default function InviteRedeemPage() {
     email: "",
     username: "",
     password: "",
-    confirmPassword: ""
+    confirmPassword: "",
+    acceptedTos: false,
   });
+  const [terms, setTerms] = useState<TermsOfService | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
+
+  useEffect(() => {
+    async function loadTerms() {
+      const response = await fetch(`${getBrowserApiBaseUrl()}/api/v1/invites/tos`, { cache: "no-store" });
+      if (!response.ok) {
+        setError("Failed to load the Terms of Service.");
+        return;
+      }
+      const payload = await response.json();
+      setTerms(payload.data);
+    }
+
+    loadTerms();
+  }, []);
 
   async function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (form.password !== form.confirmPassword) {
       setError("Passwords do not match.");
+      return;
+    }
+    if (!form.acceptedTos || !terms) {
+      setError("You must review and accept the Terms of Service.");
       return;
     }
 
@@ -33,7 +61,9 @@ export default function InviteRedeemPage() {
         code: form.code,
         email: form.email,
         username: form.username,
-        password: form.password
+        password: form.password,
+        accepted_tos: form.acceptedTos,
+        tos_version: terms.version,
       })
     });
 
@@ -77,6 +107,17 @@ export default function InviteRedeemPage() {
         <label>
           Confirm password
           <input onChange={(event) => setForm((current) => ({ ...current, confirmPassword: event.target.value }))} type="password" value={form.confirmPassword} />
+        </label>
+        <label className="checkbox-row invite-tos-check">
+          <input
+            checked={form.acceptedTos}
+            onChange={(event) => setForm((current) => ({ ...current, acceptedTos: event.target.checked }))}
+            type="checkbox"
+          />
+          <span>
+            I have read and accept the <Link href="/tos" target="_blank">current Terms of Service</Link>
+            {terms ? ` (version ${terms.version})` : ""}.
+          </span>
         </label>
         <button className="primary-button" disabled={loading} type="submit">
           {loading ? "Creating account..." : "Create account"}

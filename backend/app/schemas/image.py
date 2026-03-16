@@ -1,6 +1,7 @@
 from datetime import datetime
 
 from app.core.constants import ProcessingStatus, Rating, TagCategory, TagSource, VariantType, VisibilityStatus
+from app.schemas.comment import ImageCommentRead
 from pydantic import BaseModel, ConfigDict
 
 
@@ -50,21 +51,30 @@ class ImageListItem(BaseModel):
     original_filename: str
     width: int
     height: int
+    duration_seconds: float | None = None
+    frame_rate: float | None = None
+    has_audio: bool = False
+    video_codec: str | None = None
+    audio_codec: str | None = None
     rating: Rating
     processing_status: ProcessingStatus
     created_at: datetime
     uploaded_by: UploaderItem | None = None
     visibility_status: VisibilityStatus = VisibilityStatus.VISIBLE
     thumb_url: str | None = None
+    vote_score: int = 0
 
 
 class ImageDetail(ImageListItem):
     variants: list[ImageVariantItem]
     tags: list[ImageTagItem]
+    comments: list[ImageCommentRead] = []
     can_edit: bool = False
     can_delete: bool = False
     can_moderate: bool = False
     manual_tag_names: list[str] = []
+    current_user_vote: int | None = None
+    vote_cooldown_remaining_seconds: int = 0
 
 
 class ImageListResponse(BaseModel):

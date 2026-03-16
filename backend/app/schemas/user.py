@@ -51,6 +51,39 @@ class UserResponse(BaseModel):
     can_view_questionable: bool
     can_view_explicit: bool
     tag_blacklist: list[str] = []
+    requires_tos_acceptance: bool = False
+    accepted_tos_version: str | None = None
+    current_tos_version: str | None = None
+    tos_declined_at: str | None = None
+    tos_delete_after_at: str | None = None
+
+
+class BackupImageItem(BaseModel):
+    id: str
+    uuid_short: str
+    original_filename: str
+    created_at: datetime
+    rating: Rating
+    original_download_url: str | None = None
+
+
+class BackupExportItem(BaseModel):
+    id: int
+    status: str
+    created_at: datetime
+    started_at: datetime | None = None
+    finished_at: datetime | None = None
+    file_size: int | None = None
+    item_count: int = 0
+    current_message: str | None = None
+    error_summary: str | None = None
+    download_url: str | None = None
+
+
+class BackupDownloadsEnvelope(BaseModel):
+    data: list[BackupImageItem]
+    exports: list[BackupExportItem] = []
+    meta: dict[str, int | str | None] = {}
 
 
 class AdminUserPasswordReset(BaseModel):

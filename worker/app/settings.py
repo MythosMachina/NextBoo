@@ -33,6 +33,8 @@ class Settings(BaseSettings):
     tagger_provider: str = Field(default="camie", alias="TAGGER_PROVIDER")
     queue_name: str | None = Field(default=None, alias="QUEUE_NAME")
     stale_job_timeout_seconds: int = Field(default=300, alias="STALE_JOB_TIMEOUT_SECONDS")
+    job_heartbeat_seconds: int = Field(default=30, alias="JOB_HEARTBEAT_SECONDS")
+    worker_presence_ttl_seconds: int = Field(default=120, alias="WORKER_PRESENCE_TTL_SECONDS")
 
     @property
     def postgres_dsn(self) -> str:

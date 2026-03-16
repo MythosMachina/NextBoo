@@ -108,6 +108,17 @@ def jobs_overview(
             outcome_counts["failed"] += 1
 
     displayed_total = db.query(func.count(Image.id)).scalar() or 0
+    oldest_queued_age = (
+        db.query(func.extract("epoch", func.now() - Job.created_at))
+        .filter(Job.status.in_([JobStatus.QUEUED, JobStatus.RETRYING]))
+        .order_by(Job.created_at.asc())
+        .limit(1)
+        .scalar()
+    )
+    active_workers = sorted(
+        key.removeprefix("nextboo:workers:active:")
+        for key in redis_client.keys("nextboo:workers:active:*")
+    )
 
     return JobOverviewResponse(
         data={
@@ -116,6 +127,8 @@ def jobs_overview(
             "recent_counts": outcome_counts,
             "recent_outcomes": recent_outcomes,
             "tracked_outcomes": len(recent_outcomes),
+            "oldest_queued_age_seconds": int(oldest_queued_age) if oldest_queued_age is not None else None,
+            "active_workers": active_workers,
         },
         meta={"count": len(recent_outcomes), "stream_limit": OUTCOME_STREAM_LIMIT},
     )

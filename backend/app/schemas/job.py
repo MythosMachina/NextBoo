@@ -34,7 +34,7 @@ class JobOutcomeRead(BaseModel):
 
 
 class JobOverviewResponse(BaseModel):
-    data: dict[str, int | str | list[JobOutcomeRead] | dict[str, int]]
+    data: dict[str, int | str | list[JobOutcomeRead] | list[str] | dict[str, int] | None]
     meta: dict[str, int | str]
 
 

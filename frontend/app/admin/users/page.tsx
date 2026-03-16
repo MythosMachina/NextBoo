@@ -8,7 +8,7 @@ type User = {
   id: number;
   username: string;
   email: string | null;
-  role: "admin" | "moderator" | "uploader";
+  role: "admin" | "moderator" | "uploader" | "tos_deactivated";
   is_active: boolean;
   is_banned: boolean;
   can_upload: boolean;
@@ -247,6 +247,24 @@ export default function AdminUsersPage() {
     await loadUsers();
   }
 
+  async function reactivateTos(user: User) {
+    if (!window.confirm(`Lift backup-only ToS status for ${user.username} and require a fresh Terms of Service acceptance?`)) {
+      return;
+    }
+    setError(null);
+    setSuccess(null);
+    const response = await authFetch(`/api/v1/users/${user.id}/reactivate-tos`, {
+      method: "POST"
+    });
+    if (!response.ok) {
+      const payload = await response.json().catch(() => null);
+      setError(payload?.detail ?? "Failed to reactivate ToS access.");
+      return;
+    }
+    setSuccess("ToS block lifted. The user must accept the current Terms of Service again.");
+    await loadUsers();
+  }
+
   async function purgeUserContent(user: User) {
     if (!window.confirm(`Really remove all posts, thumbs and tag remnants for ${user.username}?`)) {
       return;
@@ -367,6 +385,17 @@ export default function AdminUsersPage() {
                       <td>
                         <div className="row-actions">
                           <button aria-label={`Edit ${user.username}`} className="icon-action" onClick={() => openEditModal(user)} title="Edit" type="button">✎</button>
+                          {user.role === "tos_deactivated" ? (
+                            <button
+                              aria-label={`Lift ToS block for ${user.username}`}
+                              className="icon-action"
+                              onClick={() => reactivateTos(user)}
+                              title="Lift ToS Block"
+                              type="button"
+                            >
+                              ⇪
+                            </button>
+                          ) : null}
                           <button aria-label={`Invite history for ${user.username}`} className="icon-action" onClick={() => openInviteHistoryModal(user)} title="Invite History" type="button">⌁</button>
                           <button aria-label={`Purge content for ${user.username}`} className="icon-action" onClick={() => purgeUserContent(user)} title="Purge Content" type="button">⌦</button>
                           <button aria-label={`Remove ${user.username}`} className="icon-action" onClick={() => removeUser(user)} title="Remove" type="button">✖</button>

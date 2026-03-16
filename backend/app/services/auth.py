@@ -3,10 +3,12 @@ from datetime import datetime, timezone
 from app.core.config import get_settings
 from app.core.security import create_token, verify_password
 from app.models.user import User
+from app.services.tos import purge_expired_tos_deactivated_users
 from sqlalchemy.orm import Session
 
 
 def authenticate_user(db: Session, username: str, password: str) -> User | None:
+    purge_expired_tos_deactivated_users(db)
     user = db.query(User).filter(User.username == username).first()
     if not user or not verify_password(password, user.password_hash) or not user.is_active or user.is_banned:
         return None

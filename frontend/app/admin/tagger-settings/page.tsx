@@ -8,18 +8,21 @@ type TaggerSettings = {
   provider: string;
   retag_all_running: boolean;
   retag_all_pending: boolean;
+  near_duplicate_hamming_threshold: number;
 };
 
 const DEFAULT_SETTINGS: TaggerSettings = {
   provider: "camie",
   retag_all_running: false,
   retag_all_pending: false,
+  near_duplicate_hamming_threshold: 6,
 };
 
 export default function AdminTaggerSettingsPage() {
   const [settings, setSettings] = useState<TaggerSettings>(DEFAULT_SETTINGS);
   const [loading, setLoading] = useState(true);
   const [queueingRetag, setQueueingRetag] = useState(false);
+  const [savingThreshold, setSavingThreshold] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
@@ -47,6 +50,26 @@ export default function AdminTaggerSettingsPage() {
     }
     const payload = await response.json();
     setSettings(payload.data);
+  }
+
+  async function saveNearDuplicateThreshold() {
+    setSavingThreshold(true);
+    setMessage(null);
+    setError(null);
+    const response = await authFetch(
+      `/api/v1/admin/settings/tagger/near-duplicate-threshold?value=${settings.near_duplicate_hamming_threshold}`,
+      {
+        method: "PATCH",
+      }
+    );
+    setSavingThreshold(false);
+    if (!response.ok) {
+      setError("Failed to save near duplicate threshold.");
+      return;
+    }
+    const payload = await response.json();
+    setSettings(payload.data);
+    setMessage("Near duplicate threshold saved.");
   }
 
   async function handlePruneAndRetag() {
@@ -104,6 +127,23 @@ export default function AdminTaggerSettingsPage() {
                   ? "Queued"
                   : "Idle"}
             </div>
+            <label>
+              Near duplicate Hamming threshold
+              <input
+                min={1}
+                onChange={(event) =>
+                  setSettings((current) => ({
+                    ...current,
+                    near_duplicate_hamming_threshold: Math.max(Number.parseInt(event.target.value || "1", 10) || 1, 1),
+                  }))
+                }
+                type="number"
+                value={settings.near_duplicate_hamming_threshold}
+              />
+            </label>
+            <button className="secondary-button" disabled={savingThreshold} onClick={saveNearDuplicateThreshold} type="button">
+              {savingThreshold ? "Saving..." : "Save threshold"}
+            </button>
             <button
               className="danger-button"
               disabled={queueingRetag || settings.retag_all_running || settings.retag_all_pending}

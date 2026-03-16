@@ -24,7 +24,7 @@ function AccountMenuLink({ href, label }: { href: string; label: string }) {
 
 export function AccountShell({ children, title, description }: AccountShellProps) {
   const router = useRouter();
-  const { authenticated, loading, setSession, user } = useAuthState();
+  const { authenticated, loading, setSession, user, isTosDeactivated } = useAuthState();
 
   useEffect(() => {
     async function resolveSession() {
@@ -70,6 +70,20 @@ export function AccountShell({ children, title, description }: AccountShellProps
     );
   }
 
+  if (isTosDeactivated) {
+    return (
+      <section className="admin-main tos-backup-only-shell">
+        <section className="panel admin-heading">
+          <h2>{title}</h2>
+          <div className="admin-heading-body">
+            <p>{description}</p>
+          </div>
+        </section>
+        {children}
+      </section>
+    );
+  }
+
   return (
     <div className="admin-layout">
       <aside className="admin-sidebar">
@@ -78,24 +92,28 @@ export function AccountShell({ children, title, description }: AccountShellProps
           <div className="admin-menu-group">
             <h3>Overview</h3>
             <div className="admin-menu-list">
-              <AccountMenuLink href="/account" label="Summary" />
+              {isTosDeactivated ? <AccountMenuLink href="/account/backup" label="Backup" /> : <AccountMenuLink href="/account" label="Summary" />}
             </div>
           </div>
-          <div className="admin-menu-group">
-            <h3>Preferences</h3>
-            <div className="admin-menu-list">
-              <AccountMenuLink href="/account/preferences" label="Content" />
-              <AccountMenuLink href="/account/security" label="Security" />
-            </div>
-          </div>
-          <div className="admin-menu-group">
-            <h3>Activity</h3>
-            <div className="admin-menu-list">
-              <AccountMenuLink href="/account/invites" label="Invites" />
-              <AccountMenuLink href="/account/access" label="Upload Access" />
-              <AccountMenuLink href="/account/uploads" label="My Uploads" />
-            </div>
-          </div>
+          {!isTosDeactivated ? (
+            <>
+              <div className="admin-menu-group">
+                <h3>Preferences</h3>
+                <div className="admin-menu-list">
+                  <AccountMenuLink href="/account/preferences" label="Content" />
+                  <AccountMenuLink href="/account/security" label="Security" />
+                </div>
+              </div>
+              <div className="admin-menu-group">
+                <h3>Activity</h3>
+                <div className="admin-menu-list">
+                  <AccountMenuLink href="/account/invites" label="Invites" />
+                  <AccountMenuLink href="/account/access" label="Upload Access" />
+                  <AccountMenuLink href="/account/uploads" label="My Uploads" />
+                </div>
+              </div>
+            </>
+          ) : null}
         </section>
       </aside>
 

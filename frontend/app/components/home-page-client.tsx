@@ -11,6 +11,8 @@ type Post = {
   original_filename: string;
   width: number;
   height: number;
+  duration_seconds?: number | null;
+  has_audio?: boolean;
   rating: "general" | "sensitive" | "questionable" | "explicit";
   processing_status: string;
   uploaded_by: {
@@ -35,6 +37,17 @@ function ratingCode(rating: Post["rating"]): string {
   return "g";
 }
 
+function mediaBadge(post: Post): string | null {
+  const extension = post.original_filename.split(".").pop()?.toLowerCase() ?? "";
+  if (["mp4", "mkv", "webm"].includes(extension)) {
+    return "VIDEO";
+  }
+  if ((post.duration_seconds ?? 0) > 0) {
+    return "ANIMATION";
+  }
+  return "IMAGE";
+}
+
 function parseRatingFilter(query: string): "general" | "sensitive" | "questionable" | "explicit" | "all" {
   const ratingToken = query
     .split(/\s+/)
@@ -52,12 +65,12 @@ function parseRatingFilter(query: string): "general" | "sensitive" | "questionab
   return "all";
 }
 
-function parseMediaTypeFilter(query: string): "all" | "image" | "animated" {
+function parseMediaTypeFilter(query: string): "all" | "image" | "animated" | "video" {
   const mediaToken = query
     .split(/\s+/)
     .map((token) => token.trim())
-    .find((token) => token === "image" || token === "animated");
-  if (mediaToken === "image" || mediaToken === "animated") {
+    .find((token) => token === "image" || token === "animated" || token === "video");
+  if (mediaToken === "image" || mediaToken === "animated" || mediaToken === "video") {
     return mediaToken;
   }
   return "all";
@@ -77,8 +90,8 @@ function parseRatingParam(value: string | null): "general" | "sensitive" | "ques
   return "all";
 }
 
-function parseMediaTypeParam(value: string | null): "all" | "image" | "animated" {
-  if (value === "image" || value === "animated") {
+function parseMediaTypeParam(value: string | null): "all" | "image" | "animated" | "video" {
+  if (value === "image" || value === "animated" || value === "video") {
     return value;
   }
   return "all";
@@ -90,7 +103,7 @@ function stripLegacyFilterTokens(query: string): string {
     .map((token) => token.trim())
     .filter(Boolean)
     .filter((token) => !token.startsWith("rating:"))
-    .filter((token) => token !== "image" && token !== "animated")
+    .filter((token) => token !== "image" && token !== "animated" && token !== "video")
     .join(" ");
 }
 
@@ -154,7 +167,7 @@ export function HomePageClient() {
       params.set("rating", normalizedStoredRating);
       changed = true;
     }
-    if (storedMediaType && ["image", "animated"].includes(storedMediaType)) {
+    if (storedMediaType && ["image", "animated", "video"].includes(storedMediaType)) {
       params.set("media_type", storedMediaType);
       changed = true;
     }
@@ -361,7 +374,7 @@ export function HomePageClient() {
     updateRoute(params);
   }
 
-  function applyMediaTypeFilter(nextMediaType: "all" | "image" | "animated") {
+  function applyMediaTypeFilter(nextMediaType: "all" | "image" | "animated" | "video") {
     if (typeof window !== "undefined") {
       if (nextMediaType === "all") {
         window.localStorage.removeItem(MEDIA_TYPE_STORAGE_KEY);
@@ -485,7 +498,7 @@ export function HomePageClient() {
               <button
                 className={mediaTypeFilter === mediaType.name_normalized ? "page-number active" : "page-number"}
                 key={mediaType.id}
-                onClick={() => applyMediaTypeFilter(mediaType.name_normalized as "image" | "animated")}
+                onClick={() => applyMediaTypeFilter(mediaType.name_normalized as "image" | "animated" | "video")}
                 type="button"
               >
                 {mediaType.display_name}
@@ -553,6 +566,7 @@ export function HomePageClient() {
             <article className={selectedPostIds.includes(post.id) ? "thumb-card selected" : "thumb-card"} key={post.id}>
               <a className="thumb-frame" href={`/posts/${post.id}`}>
                 <span className={`rating rating-${ratingCode(post.rating)}`}>{ratingCode(post.rating)}</span>
+                {mediaBadge(post) ? <span className="thumb-media-badge">{mediaBadge(post)}</span> : null}
                 {post.thumb_url ? (
                   // eslint-disable-next-line @next/next/no-img-element
                   <img alt={post.original_filename} className="thumb-image" loading="lazy" src={post.thumb_url} />
@@ -573,6 +587,7 @@ export function HomePageClient() {
               <div className="thumb-caption">
                 <div className="thumb-stats">
                   <span>{post.width}x{post.height}</span>
+                  {post.duration_seconds ? <span>{Math.round(post.duration_seconds)}s</span> : null}
                   <span>{post.rating}</span>
                 </div>
                 <p>

@@ -62,3 +62,38 @@ class ModerationImageRead(BaseModel):
 class ModerationImagesEnvelope(BaseModel):
     data: list[ModerationImageRead]
     meta: dict[str, int | str | None] = {}
+
+
+class ModerationCommentRead(BaseModel):
+    id: int
+    image_id: str
+    image_uuid_short: str
+    image_rating: Rating
+    body: str
+    score: int
+    is_flagged: bool
+    author_username: str | None
+    created_at: datetime
+    updated_at: datetime
+
+
+class ModerationCommentsEnvelope(BaseModel):
+    data: list[ModerationCommentRead]
+    meta: dict[str, int | str | None] = {}
+
+
+class ModerationNearDuplicateRead(BaseModel):
+    id: int
+    image_id: str
+    similar_image_id: str
+    image_uuid_short: str
+    similar_image_uuid_short: str
+    hamming_distance: int
+    status: str
+    created_at: datetime
+    updated_at: datetime
+
+
+class ModerationNearDuplicatesEnvelope(BaseModel):
+    data: list[ModerationNearDuplicateRead]
+    meta: dict[str, int | str | None] = {}

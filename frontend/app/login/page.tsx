@@ -36,6 +36,14 @@ export default function LoginPage() {
       storeUser(user);
       setSession(user);
     }
+    if (user?.role === "tos_deactivated") {
+      window.location.href = "/account/backup";
+      return;
+    }
+    if (user?.requires_tos_acceptance) {
+      window.location.href = "/tos/review";
+      return;
+    }
     window.location.href = user?.role === "admin" || user?.role === "moderator" ? "/admin" : "/account";
   }
 

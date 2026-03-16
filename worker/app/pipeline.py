@@ -1,4 +1,5 @@
 import logging
+import json
 import subprocess
 import shutil
 from dataclasses import dataclass
@@ -22,6 +23,11 @@ class ProcessedImage:
     uuid_short: str
     width: int
     height: int
+    duration_seconds: float | None
+    frame_rate: float | None
+    has_audio: bool
+    video_codec: str | None
+    audio_codec: str | None
     aspect_ratio: float
     source_hash: str
     perceptual_hash: str
@@ -137,6 +143,58 @@ def probe_duration(source_path: Path) -> float:
         return 0.0
 
 
+def probe_media_metadata(source_path: Path) -> dict[str, object]:
+    command = [
+        "ffprobe",
+        "-v",
+        "error",
+        "-print_format",
+        "json",
+        "-show_streams",
+        "-show_format",
+        str(source_path),
+    ]
+    try:
+        result = subprocess.run(command, check=True, capture_output=True, text=True)
+        payload = json.loads(result.stdout or "{}")
+    except Exception:
+        return {
+            "duration_seconds": None,
+            "frame_rate": None,
+            "has_audio": False,
+            "video_codec": None,
+            "audio_codec": None,
+        }
+
+    streams = payload.get("streams", [])
+    format_section = payload.get("format", {})
+    video_stream = next((stream for stream in streams if stream.get("codec_type") == "video"), None)
+    audio_stream = next((stream for stream in streams if stream.get("codec_type") == "audio"), None)
+
+    duration_raw = format_section.get("duration") or (video_stream or {}).get("duration")
+    try:
+        duration_seconds = float(duration_raw) if duration_raw is not None else None
+    except (TypeError, ValueError):
+        duration_seconds = None
+
+    avg_frame_rate = (video_stream or {}).get("avg_frame_rate")
+    frame_rate = None
+    if avg_frame_rate and avg_frame_rate != "0/0":
+        try:
+            numerator, denominator = avg_frame_rate.split("/", 1)
+            frame_rate = float(numerator) / float(denominator)
+        except Exception:
+            frame_rate = None
+
+    return {
+        "duration_seconds": duration_seconds,
+        "frame_rate": frame_rate,
+        "has_audio": audio_stream is not None,
+        "video_codec": (video_stream or {}).get("codec_name"),
+        "audio_codec": (audio_stream or {}).get("codec_name"),
+    }
+
+
 def original_mime_for_suffix(suffix: str) -> str:
     return {
         ".jpg": "image/jpeg",
@@ -148,6 +206,8 @@ def original_mime_for_suffix(suffix: str) -> str:
         ".tiff": "image/tiff",
         ".gif": "image/gif",
         ".webm": "video/webm",
+        ".mp4": "video/mp4",
+        ".mkv": "video/x-matroska",
     }.get(suffix, "application/octet-stream")
 
 
@@ -241,12 +301,21 @@ def process_image(
     uuid_short = storage.derive_uuid_short(full_uuid)
     storage.prepare_variant_dirs(uuid_short)
     source_suffix = source_path.suffix.lower()
-    treat_as_animated = source_suffix in {".gif", ".webm"} or (source_suffix == ".webp" and is_animated_webp(local_input))
-    storage_ext = source_suffix.lstrip(".") if treat_as_animated else "png"
-    original_mime_type = original_mime_for_suffix(source_suffix if treat_as_animated else ".png")
+    is_video = source_suffix in {".webm", ".mp4", ".mkv"}
+    treat_as_animated = source_suffix == ".gif" or (source_suffix == ".webp" and is_animated_webp(local_input))
+    treat_as_motion = is_video or treat_as_animated
+    storage_ext = source_suffix.lstrip(".") if treat_as_motion else "png"
+    original_mime_type = original_mime_for_suffix(source_suffix if treat_as_motion else ".png")
     original_path = storage.content_file(uuid_short, storage_ext)
     thumb_path = storage.thumb_file(uuid_short)
-    if treat_as_animated:
+    media_metadata = probe_media_metadata(local_input) if treat_as_motion else {
+        "duration_seconds": None,
+        "frame_rate": None,
+        "has_audio": False,
+        "video_codec": None,
+        "audio_codec": None,
+    }
+    if treat_as_motion:
         width, height, perceptual_hash, tag_prediction = process_animated_or_video(
             local_input, original_path, thumb_path, workdir, thumb_max_edge, tagger
         )
@@ -273,6 +342,11 @@ def process_image(
         uuid_short=uuid_short,
         width=width,
         height=height,
+        duration_seconds=media_metadata["duration_seconds"],
+        frame_rate=media_metadata["frame_rate"],
+        has_audio=bool(media_metadata["has_audio"]),
+        video_codec=media_metadata["video_codec"],
+        audio_codec=media_metadata["audio_codec"],
         aspect_ratio=round(width / height, 4) if height else 1.0,
         source_hash=source_hash,
         perceptual_hash=perceptual_hash,
@@ -284,5 +358,5 @@ def process_image(
         original_mime_type=original_mime_type,
         processed_at=processed_at,
         tag_prediction=tag_prediction,
-        media_kind="animated" if treat_as_animated else "image",
+        media_kind="video" if is_video else "animated" if treat_as_animated else "image",
     )

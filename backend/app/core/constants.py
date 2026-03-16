@@ -5,6 +5,7 @@ class UserRole(StrEnum):
     ADMIN = "admin"
     MODERATOR = "moderator"
     UPLOADER = "uploader"
+    TOS_DEACTIVATED = "tos_deactivated"
 
 
 class Rating(StrEnum):
@@ -103,7 +104,7 @@ class VariantType(StrEnum):
     THUMB = "thumb"
 
 
-SYSTEM_TAGS = {"image", "animated"}
+SYSTEM_TAGS = {"image", "animated", "video"}
 
 
 class InviteStatus(StrEnum):

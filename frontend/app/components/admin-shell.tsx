@@ -90,6 +90,10 @@ export function AdminShell({ children, title, description }: AdminShellProps) {
             <div className="admin-menu-list">
               <AdminMenuLink href="/admin/reports" label="Reports" />
               <AdminMenuLink href="/admin/content" label="Content" />
+              <AdminMenuLink href="/admin/comments" label="Comments" />
+              <AdminMenuLink href="/admin/near-duplicates" label="Near Duplicates" />
+              <AdminMenuLink href="/admin/tags" label="Tags" />
+              <AdminMenuLink href="/admin/danger-tags" label="Danger Tags" />
               <AdminMenuLink href="/admin/rating-rules" label="Rating Rules" />
               <AdminMenuLink href="/admin/strikes" label="Strikes" />
             </div>
@@ -99,8 +103,12 @@ export function AdminShell({ children, title, description }: AdminShellProps) {
             <div className="admin-menu-list">
               <AdminMenuLink href="/admin/jobs" label="Jobs" />
               <AdminMenuLink href="/admin/imports" label="Imports" />
+              <AdminMenuLink href="/admin/board-imports" label="Board Importer" />
+              <AdminMenuLink href="/admin/worker-scaling" label="Worker Scaling" />
               <AdminMenuLink href="/admin/tagger-settings" label="Tagger Maintenance" />
               <AdminMenuLink href="/admin/sidebar-settings" label="Sidebar Settings" />
+              <AdminMenuLink href="/admin/rate-limits" label="Rate Limits" />
+              {user.role === "admin" ? <AdminMenuLink href="/admin/tos" label="Terms of Service" /> : null}
             </div>
           </div>
           {user.role === "admin" ? (

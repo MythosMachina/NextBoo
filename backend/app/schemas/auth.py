@@ -34,6 +34,11 @@ class UserRead(BaseModel):
     can_view_questionable: bool
     can_view_explicit: bool
     tag_blacklist: list[str] = []
+    requires_tos_acceptance: bool = False
+    accepted_tos_version: str | None = None
+    current_tos_version: str | None = None
+    tos_declined_at: str | None = None
+    tos_delete_after_at: str | None = None
 
 
 class MeResponse(BaseModel):

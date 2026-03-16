@@ -48,3 +48,15 @@ class ImageReport(TimestampMixin, Base):
 
     image = relationship("Image", back_populates="reports")
 
+
+class NearDuplicateReview(TimestampMixin, Base):
+    __tablename__ = "near_duplicate_reviews"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    image_id: Mapped[str] = mapped_column(ForeignKey("images.id", ondelete="CASCADE"), nullable=False, index=True)
+    similar_image_id: Mapped[str] = mapped_column(ForeignKey("images.id", ondelete="CASCADE"), nullable=False, index=True)
+    hamming_distance: Mapped[int] = mapped_column(nullable=False, index=True)
+    status: Mapped[str] = mapped_column(String(32), default="open", nullable=False, index=True)
+    reviewed_by_user_id: Mapped[int | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+    review_note: Mapped[str | None] = mapped_column(Text, nullable=True)
+    reviewed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)

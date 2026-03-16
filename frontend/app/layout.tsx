@@ -4,6 +4,7 @@ import { ReactNode } from "react";
 import { AppShell } from "./components/app-shell";
 import { AuthProvider } from "./components/auth";
 import { TagContextMenuProvider } from "./components/tag-context-menu";
+import { TosGate } from "./components/tos-gate";
 
 export const metadata: Metadata = {
   title: "NextBoo",
@@ -29,6 +30,7 @@ export default function RootLayout({ children }: { children: ReactNode }) {
           }}
         />
         <AuthProvider>
+          <TosGate />
           <TagContextMenuProvider>
             <AppShell>{children}</AppShell>
           </TagContextMenuProvider>

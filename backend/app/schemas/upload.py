@@ -29,3 +29,21 @@ class UploadJobStatusItem(BaseModel):
 class UploadStatusResponse(BaseModel):
     data: list[UploadJobStatusItem]
     meta: dict[str, int | str]
+
+
+class ImportFolderRequest(BaseModel):
+    folder_name: str
+
+
+class ImportZipRequest(BaseModel):
+    zip_name: str
+
+
+class ImportSourceListing(BaseModel):
+    folders: list[str]
+    zip_archives: list[str]
+
+
+class ImportSourceResponse(BaseModel):
+    data: ImportSourceListing
+    meta: dict[str, int | str]

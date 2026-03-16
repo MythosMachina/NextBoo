@@ -63,3 +63,25 @@ class TagRatingRule(TimestampMixin, Base):
     is_enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
 
     tag = relationship("Tag", back_populates="rating_rule")
+
+
+class DangerTag(TimestampMixin, Base):
+    __tablename__ = "danger_tags"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    tag_id: Mapped[int] = mapped_column(ForeignKey("tags.id", ondelete="CASCADE"), unique=True, nullable=False, index=True)
+    is_enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_by_user_id: Mapped[int | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+
+    tag = relationship("Tag")
+
+
+class ImageDangerHit(Base):
+    __tablename__ = "image_danger_hits"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    image_id: Mapped[str] = mapped_column(ForeignKey("images.id", ondelete="CASCADE"), nullable=False, index=True)
+    tag_id: Mapped[int] = mapped_column(ForeignKey("tags.id", ondelete="CASCADE"), nullable=False, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    reason: Mapped[str | None] = mapped_column(Text, nullable=True)

@@ -1,23 +1,29 @@
 from datetime import datetime, timezone
 from typing import Annotated
 
-from app.api.deps import DbSession, get_current_user, require_roles
+from app.api.deps import DbSession, RedisClient, get_current_user, require_roles
 from app.core.constants import Rating, ReportStatus, UserRole, VisibilityStatus
 from app.models.image import Image
-from app.models.moderation import ImageModeration, ImageReport
+from app.models.comment import CommentVote, ImageComment
+from app.models.moderation import ImageModeration, ImageReport, NearDuplicateReview
 from app.models.tag import Tag, TagRatingRule
 from app.models.user import User
 from app.schemas.moderation import (
+    ModerationCommentRead,
+    ModerationCommentsEnvelope,
     ModerationImageRead,
     ModerationImagesEnvelope,
+    ModerationNearDuplicateRead,
+    ModerationNearDuplicatesEnvelope,
     ModerationReportRead,
     ModerationReportsEnvelope,
     ReportReviewUpdate,
 )
 from app.schemas.tag_rating_rule import TagRatingRuleEnvelope, TagRatingRuleUpsert
 from app.services.rating_rules import get_or_create_rule_tag, reclassify_all_images_from_rules
+from app.services.rate_limits import enforce_rate_limit
 from app.services.visibility import resolve_visibility_status
-from fastapi import APIRouter, Depends, Query, HTTPException, status
+from fastapi import APIRouter, Depends, Query, HTTPException, Request, status
 from sqlalchemy import desc, func
 from sqlalchemy.orm import aliased
 
@@ -58,8 +64,11 @@ def list_rating_rules(
 def upsert_rating_rule(
     payload: TagRatingRuleUpsert,
     db: DbSession,
-    _: Annotated[User, Depends(require_roles(UserRole.ADMIN))],
+    redis_client: RedisClient,
+    request: Request,
+    current_user: Annotated[User, Depends(require_roles(UserRole.ADMIN))],
 ) -> dict:
+    enforce_rate_limit(db, redis_client, request, "admin_write", current_user=current_user)
     tag = get_or_create_rule_tag(db, payload.tag_name)
     rule = db.query(TagRatingRule).filter(TagRatingRule.tag_id == tag.id).first()
     if rule is None:
@@ -76,8 +85,11 @@ def upsert_rating_rule(
 def delete_rating_rule(
     rule_id: int,
     db: DbSession,
-    _: Annotated[User, Depends(require_roles(UserRole.ADMIN))],
+    redis_client: RedisClient,
+    request: Request,
+    current_user: Annotated[User, Depends(require_roles(UserRole.ADMIN))],
 ) -> dict:
+    enforce_rate_limit(db, redis_client, request, "admin_write", current_user=current_user)
     rule = db.get(TagRatingRule, rule_id)
     if not rule:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Rating rule not found")
@@ -89,8 +101,11 @@ def delete_rating_rule(
 @router.post("/rating-rules/reclassify")
 def reclassify_existing_ratings(
     db: DbSession,
-    _: Annotated[User, Depends(require_roles(UserRole.ADMIN))],
+    redis_client: RedisClient,
+    request: Request,
+    current_user: Annotated[User, Depends(require_roles(UserRole.ADMIN))],
 ) -> dict:
+    enforce_rate_limit(db, redis_client, request, "admin_write", current_user=current_user)
     changed = reclassify_all_images_from_rules(db)
     db.commit()
     return {"data": {"status": "reclassified", "changed_images": changed}, "meta": {}}
@@ -155,10 +170,13 @@ def review_report(
     report_id: int,
     payload: ReportReviewUpdate,
     db: DbSession,
+    redis_client: RedisClient,
+    request: Request,
     current_user: Annotated[User, Depends(get_current_user)],
 ) -> dict:
     if current_user.role not in {UserRole.ADMIN, UserRole.MODERATOR}:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Insufficient permissions")
+    enforce_rate_limit(db, redis_client, request, "admin_write", current_user=current_user)
     report = db.get(ImageReport, report_id)
     if not report:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Report not found")
@@ -226,3 +244,131 @@ def list_moderation_images(
         for image, visibility_status, uploaded_by_username, report_count_open in rows
     ]
     return ModerationImagesEnvelope(data=data, meta={"count": len(data), "visibility": visibility})
+
+
+@router.get("/comments", response_model=ModerationCommentsEnvelope)
+def list_flagged_comments(
+    db: DbSession,
+    _: Annotated[User, Depends(require_roles(UserRole.ADMIN, UserRole.MODERATOR))],
+    flagged_only: bool = Query(default=True),
+    limit: int = Query(default=100, ge=1, le=200),
+) -> ModerationCommentsEnvelope:
+    author = aliased(User)
+    score_subquery = (
+        db.query(CommentVote.comment_id, func.coalesce(func.sum(CommentVote.value), 0).label("score"))
+        .group_by(CommentVote.comment_id)
+        .subquery()
+    )
+
+    query = (
+        db.query(
+            ImageComment,
+            Image,
+            author.username,
+            func.coalesce(score_subquery.c.score, 0),
+        )
+        .join(Image, Image.id == ImageComment.image_id)
+        .outerjoin(author, author.id == ImageComment.user_id)
+        .outerjoin(score_subquery, score_subquery.c.comment_id == ImageComment.id)
+        .order_by(desc(ImageComment.updated_at))
+    )
+    if flagged_only:
+        query = query.filter(ImageComment.is_flagged.is_(True))
+
+    rows = query.limit(limit).all()
+    data = [
+        ModerationCommentRead(
+            id=comment.id,
+            image_id=image.id,
+            image_uuid_short=image.uuid_short,
+            image_rating=image.rating,
+            body=comment.body,
+            score=int(score or 0),
+            is_flagged=comment.is_flagged,
+            author_username=author_username,
+            created_at=comment.created_at,
+            updated_at=comment.updated_at,
+        )
+        for comment, image, author_username, score in rows
+    ]
+    return ModerationCommentsEnvelope(data=data, meta={"count": len(data), "flagged_only": "true" if flagged_only else "false"})
+
+
+@router.patch("/comments/{comment_id}/clear-flag")
+def clear_comment_flag(
+    comment_id: int,
+    db: DbSession,
+    redis_client: RedisClient,
+    request: Request,
+    current_user: Annotated[User, Depends(require_roles(UserRole.ADMIN, UserRole.MODERATOR))],
+) -> dict:
+    enforce_rate_limit(db, redis_client, request, "admin_write", current_user=current_user)
+    comment = db.get(ImageComment, comment_id)
+    if not comment:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Comment not found")
+    comment.is_flagged = False
+    db.add(comment)
+    db.commit()
+    return {"data": {"status": "cleared", "comment_id": comment.id}, "meta": {}}
+
+
+@router.get("/near-duplicates", response_model=ModerationNearDuplicatesEnvelope)
+def list_near_duplicates(
+    db: DbSession,
+    _: Annotated[User, Depends(require_roles(UserRole.ADMIN, UserRole.MODERATOR))],
+    status_filter: str = Query(default="open"),
+    limit: int = Query(default=100, ge=1, le=200),
+) -> ModerationNearDuplicatesEnvelope:
+    left_image = aliased(Image)
+    right_image = aliased(Image)
+    query = (
+        db.query(NearDuplicateReview, left_image, right_image)
+        .join(left_image, left_image.id == NearDuplicateReview.image_id)
+        .join(right_image, right_image.id == NearDuplicateReview.similar_image_id)
+        .order_by(desc(NearDuplicateReview.created_at))
+    )
+    if status_filter != "all":
+        query = query.filter(NearDuplicateReview.status == status_filter)
+
+    rows = query.limit(limit).all()
+    return ModerationNearDuplicatesEnvelope(
+        data=[
+            ModerationNearDuplicateRead(
+                id=review.id,
+                image_id=review.image_id,
+                similar_image_id=review.similar_image_id,
+                image_uuid_short=image.uuid_short,
+                similar_image_uuid_short=similar_image.uuid_short,
+                hamming_distance=review.hamming_distance,
+                status=review.status,
+                created_at=review.created_at,
+                updated_at=review.updated_at,
+            )
+            for review, image, similar_image in rows
+        ],
+        meta={"count": len(rows), "status": status_filter},
+    )
+
+
+@router.patch("/near-duplicates/{review_id}")
+def review_near_duplicate(
+    review_id: int,
+    action: str,
+    db: DbSession,
+    redis_client: RedisClient,
+    request: Request,
+    current_user: Annotated[User, Depends(require_roles(UserRole.ADMIN, UserRole.MODERATOR))],
+) -> dict:
+    enforce_rate_limit(db, redis_client, request, "admin_write", current_user=current_user)
+    review = db.get(NearDuplicateReview, review_id)
+    if not review:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Near duplicate review not found")
+    normalized_action = action.strip().lower()
+    if normalized_action not in {"dismissed", "confirmed"}:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid action")
+    review.status = normalized_action
+    review.reviewed_by_user_id = current_user.id
+    review.reviewed_at = datetime.now(timezone.utc)
+    db.add(review)
+    db.commit()
+    return {"data": {"status": review.status, "review_id": review.id}, "meta": {}}

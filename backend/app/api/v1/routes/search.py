@@ -1,13 +1,14 @@
 from typing import Annotated
 
-from app.api.deps import DbSession, get_optional_current_user
+from app.api.deps import DbSession, RedisClient, get_optional_current_user
 from app.core.constants import ProcessingStatus
 from app.models.image import Image, ImageTag
 from app.models.tag import Tag, TagAlias
 from app.models.user import User
+from app.services.rate_limits import enforce_rate_limit
 from app.services.search import normalize_tag_token, parse_media_type_filter, parse_rating_filter, parse_search_query
 from app.services.visibility import apply_public_image_visibility
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, Query, Request
 from sqlalchemy import and_, desc
 from sqlalchemy.orm import selectinload
 from app.services.media import thumb_url_for_image
@@ -29,6 +30,8 @@ def apply_media_type_filter(query, db: DbSession, media_type: str | None):
 @router.get("", response_model=ImageListResponse)
 def search_images(
     db: DbSession,
+    redis_client: RedisClient,
+    request: Request,
     q: str = Query(default=""),
     rating: str | None = Query(default=None),
     media_type: str | None = Query(default=None),
@@ -36,6 +39,7 @@ def search_images(
     limit: int = Query(default=50, ge=1, le=200),
     current_user: Annotated[User | None, Depends(get_optional_current_user)] = None,
 ) -> ImageListResponse:
+    enforce_rate_limit(db, redis_client, request, "search", current_user=current_user)
     parsed = parse_search_query(q)
     query = (
         db.query(Image)

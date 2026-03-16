@@ -4,6 +4,7 @@ import Link from "next/link";
 import { AuthStatus } from "./auth-status";
 import { BoardSearch } from "./board-search";
 import { HeaderNav } from "./shell-nav";
+import { ShellAccessGate } from "./shell-access-gate";
 import { SidebarTagPanels } from "./sidebar-tag-panels";
 import { ThemeToggle } from "./theme-toggle";
 
@@ -25,42 +26,46 @@ export async function AppShell({ children }: { children: ReactNode }) {
           </div>
         </div>
 
-        <Suspense
-          fallback={
-            <form action="/" className="search-form">
-              <div className="search-input-wrap">
-                <input aria-label="Search posts" name="q" placeholder="Search tags" type="search" />
-                <div className="search-help">
-                  <button aria-label="Show search syntax help" className="search-help-trigger" type="button">
-                    ?
-                  </button>
+        <ShellAccessGate>
+          <Suspense
+            fallback={
+              <form action="/" className="search-form">
+                <div className="search-input-wrap">
+                  <input aria-label="Search posts" name="q" placeholder="Search tags" type="search" />
+                  <div className="search-help">
+                    <button aria-label="Show search syntax help" className="search-help-trigger" type="button">
+                      ?
+                    </button>
+                  </div>
                 </div>
-              </div>
-              <button type="submit">Search</button>
-            </form>
-          }
-        >
-          <BoardSearch />
-        </Suspense>
+                <button type="submit">Search</button>
+              </form>
+            }
+          >
+            <BoardSearch />
+          </Suspense>
+        </ShellAccessGate>
       </header>
 
       <div className="board-main">
-        <aside className="left-column">
-          <Suspense
-            fallback={
-              <section className="panel">
-                <h2>Tag Browser</h2>
-                <div className="tag-browser-groups">
-                  <div className="empty-state compact-empty-state">
-                    <strong>Loading tags.</strong>
+        <ShellAccessGate>
+          <aside className="left-column">
+            <Suspense
+              fallback={
+                <section className="panel">
+                  <h2>Tag Browser</h2>
+                  <div className="tag-browser-groups">
+                    <div className="empty-state compact-empty-state">
+                      <strong>Loading tags.</strong>
+                    </div>
                   </div>
-                </div>
-              </section>
-            }
-          >
-            <SidebarTagPanels />
-          </Suspense>
-        </aside>
+                </section>
+              }
+            >
+              <SidebarTagPanels />
+            </Suspense>
+          </aside>
+        </ShellAccessGate>
 
         <section className="center-column board-content">{children}</section>
       </div>

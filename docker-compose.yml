@@ -83,8 +83,12 @@ services:
       MODEL_PATH: ${MODEL_PATH:-/models}
       WORKER_CONCURRENCY: ${WORKER_CONCURRENCY:-2}
       THUMB_MAX_EDGE: ${THUMB_MAX_EDGE:-250}
+      JOB_HEARTBEAT_SECONDS: ${JOB_HEARTBEAT_SECONDS:-30}
+      WORKER_PRESENCE_TTL_SECONDS: ${WORKER_PRESENCE_TTL_SECONDS:-120}
       TAGGER_PROVIDER: camie
       QUEUE_NAME: jobs:ingest:camie
+    cpus: ${WORKER_CPU_LIMIT:-4}
+    mem_limit: ${WORKER_MEMORY_LIMIT:-8g}
     depends_on:
       postgres:
         condition: service_healthy
@@ -98,6 +102,29 @@ services:
       - ${GALLERY_ROOT:-./gallery}/content_thumbs:/app/content_thumbs
       - ${GALLERY_ROOT:-./gallery}/imports:/app/imports
       - ${GALLERY_ROOT:-./gallery}/models:/models
+
+  worker_autoscaler:
+    build:
+      context: ./autoscaler
+      dockerfile: Dockerfile
+    environment:
+      POSTGRES_HOST: ${POSTGRES_HOST:-postgres}
+      POSTGRES_PORT: ${POSTGRES_PORT:-5432}
+      POSTGRES_DB: ${POSTGRES_DB:-nextboo}
+      POSTGRES_USER: ${POSTGRES_USER:-nextboo}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-nextboo}
+      REDIS_HOST: ${REDIS_HOST:-redis}
+      REDIS_PORT: ${REDIS_PORT:-6379}
+      QUEUE_NAME: jobs:ingest:camie
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_started
+      worker:
+        condition: service_started
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
 
   postgres:
     image: postgres:16
