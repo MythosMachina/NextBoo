@@ -622,6 +622,10 @@ code {
   background: var(--panel);
 }
 
+.board-main > .center-column:only-child {
+  grid-column: 1 / -1;
+}
+
 .board-content {
   display: flex;
   flex-direction: column;
