@@ -62,6 +62,8 @@ class ImageListItem(BaseModel):
     uploaded_by: UploaderItem | None = None
     visibility_status: VisibilityStatus = VisibilityStatus.VISIBLE
     thumb_url: str | None = None
+    preview_url: str | None = None
+    preview_mime_type: str | None = None
     vote_score: int = 0
 
 

@@ -59,15 +59,13 @@ class Settings(BaseSettings):
         provider = self.tagger_provider.strip().lower() if self.tagger_provider else "camie"
         return f"jobs:maintenance:{provider}"
 
-    @property
-    def maintenance_running_key(self) -> str:
+    def maintenance_running_key_for_action(self, action: str) -> str:
         provider = self.tagger_provider.strip().lower() if self.tagger_provider else "camie"
-        return f"maintenance:{provider}:retag_all:running"
+        return f"maintenance:{provider}:{action}:running"
 
-    @property
-    def maintenance_pending_key(self) -> str:
+    def maintenance_pending_key_for_action(self, action: str) -> str:
         provider = self.tagger_provider.strip().lower() if self.tagger_provider else "camie"
-        return f"maintenance:{provider}:retag_all:pending"
+        return f"maintenance:{provider}:{action}:pending"
 
 
 @lru_cache

@@ -83,6 +83,8 @@ class TaggerSettingsRead(BaseModel):
     provider: str
     retag_all_running: bool = False
     retag_all_pending: bool = False
+    preview_backfill_running: bool = False
+    preview_backfill_pending: bool = False
     near_duplicate_hamming_threshold: int = 6
 
 
@@ -92,6 +94,11 @@ class TaggerSettingsResponse(BaseModel):
 
 
 class RetagAllResponse(BaseModel):
+    data: TaggerSettingsRead
+    meta: dict[str, str] = {}
+
+
+class PreviewBackfillResponse(BaseModel):
     data: TaggerSettingsRead
     meta: dict[str, str] = {}
 

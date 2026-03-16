@@ -10,6 +10,7 @@ from app.schemas.app_settings import (
     AutoscalerSettingsRead,
     AutoscalerSettingsResponse,
     AutoscalerSettingsUpdate,
+    PreviewBackfillResponse,
     RateLimitSettingsRead,
     RateLimitSettingsResponse,
     RateLimitSettingsUpdate,
@@ -24,6 +25,7 @@ from app.schemas.app_settings import (
     TermsOfServiceUpdate,
 )
 from app.services.app_settings import (
+    PREVIEW_BACKFILL_ACTION,
     RETAG_ALL_ACTION,
     get_autoscaler_settings,
     get_near_duplicate_threshold,
@@ -62,6 +64,8 @@ def build_tagger_settings_response(db: DbSession, redis: RedisClient) -> TaggerS
             provider=active_provider,
             retag_all_running=bool(redis.exists(maintenance_running_key(active_provider, RETAG_ALL_ACTION))),
             retag_all_pending=bool(redis.exists(maintenance_pending_key(active_provider, RETAG_ALL_ACTION))),
+            preview_backfill_running=bool(redis.exists(maintenance_running_key(active_provider, PREVIEW_BACKFILL_ACTION))),
+            preview_backfill_pending=bool(redis.exists(maintenance_pending_key(active_provider, PREVIEW_BACKFILL_ACTION))),
             near_duplicate_hamming_threshold=get_near_duplicate_threshold(db),
         ),
         meta={},
@@ -229,6 +233,43 @@ def enqueue_prune_and_retag(
     db.commit()
     response = build_tagger_settings_response(db, redis)
     return RetagAllResponse(data=response.data, meta={})
+
+
+@router.post("/tagger/backfill-previews", response_model=PreviewBackfillResponse)
+def enqueue_preview_backfill(
+    db: DbSession,
+    redis: RedisClient,
+    request: Request,
+    current_user: Annotated[User, Depends(require_roles(UserRole.ADMIN))],
+) -> PreviewBackfillResponse:
+    enforce_rate_limit(db, redis, request, "admin_write", current_user=current_user)
+    active_provider = get_tagger_provider(db)
+    pending_key = maintenance_pending_key(active_provider, PREVIEW_BACKFILL_ACTION)
+    running_key = maintenance_running_key(active_provider, PREVIEW_BACKFILL_ACTION)
+
+    if redis.exists(running_key):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="A preview backfill task is already running for the active tagger.",
+        )
+    if not redis.set(pending_key, "1", nx=True, ex=3600):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="A preview backfill task is already queued for the active tagger.",
+        )
+
+    queue_name = maintenance_queue_name_for_provider(active_provider)
+    payload = QueueMaintenancePayload(
+        action=PREVIEW_BACKFILL_ACTION,
+        requested_by_user_id=current_user.id,
+        requested_by_username=current_user.username,
+    )
+    redis.rpush(queue_name, payload.model_dump_json())
+
+    db.execute(text("UPDATE app_settings SET updated_at = NOW() WHERE key = :key"), {"key": "tagger_provider"})
+    db.commit()
+    response = build_tagger_settings_response(db, redis)
+    return PreviewBackfillResponse(data=response.data, meta={})
 
 
 @router.patch("/tagger/near-duplicate-threshold", response_model=TaggerSettingsResponse)

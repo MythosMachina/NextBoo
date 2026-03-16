@@ -2,7 +2,7 @@ from datetime import datetime, timezone
 from typing import Annotated
 
 from app.api.deps import DbSession, get_current_user, get_optional_current_user
-from app.core.constants import ProcessingStatus, Rating, TagCategory, TagSource, UserRole, VisibilityStatus
+from app.core.constants import ProcessingStatus, Rating, TagCategory, TagSource, UserRole, VariantType, VisibilityStatus
 from app.models.image import Image, ImageTag
 from app.models.comment import CommentVote, ImageComment
 from app.models.moderation import ImageModeration, ImageReport
@@ -13,7 +13,7 @@ from app.schemas.image import ImageDetail, ImageDetailResponse, ImageListItem, I
 from app.schemas.comment import CommentVoteCreate, ImageCommentCreate, ImageCommentRead, ImageCommentUpdate
 from app.schemas.moderation import ImageMetadataUpdate, ImageReportCreate, ImageVisibilityUpdate
 from app.schemas.vote import ImageVoteCreate, ImageVoteRead
-from app.services.media import build_media_url, thumb_url_for_image
+from app.services.media import build_media_url, preview_url_for_image, thumb_url_for_image
 from app.services.rating_cues import apply_staff_rating_cues
 from app.services.search import normalize_tag_token, parse_media_type_filter, parse_rating_filter
 from app.services.deletion import hard_delete_image
@@ -220,6 +220,9 @@ def list_images(
     for image in images:
         item = ImageListItem.model_validate(image)
         item.thumb_url = thumb_url_for_image(image)
+        item.preview_url = preview_url_for_image(image)
+        preview_variant = next((variant for variant in image.variants if variant.variant_type == VariantType.PREVIEW), None)
+        item.preview_mime_type = preview_variant.mime_type if preview_variant else None
         attach_image_state(item, image, current_user)
         attach_vote_state(db, item, image.id, current_user)
         items.append(item)
@@ -307,6 +310,9 @@ def related_images(
     for related in images:
         item = ImageListItem.model_validate(related)
         item.thumb_url = thumb_url_for_image(related)
+        item.preview_url = preview_url_for_image(related)
+        preview_variant = next((variant for variant in related.variants if variant.variant_type == VariantType.PREVIEW), None)
+        item.preview_mime_type = preview_variant.mime_type if preview_variant else None
         attach_image_state(item, related, current_user)
         attach_vote_state(db, item, related.id, current_user)
         items.append(item)

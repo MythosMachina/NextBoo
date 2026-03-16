@@ -41,6 +41,9 @@ class StorageService:
     def thumb_file(self, short_id: str) -> Path:
         return self.thumb_path / self.shard_for(short_id) / f"{short_id}.webp"
 
+    def preview_file(self, short_id: str) -> Path:
+        return self.thumb_path / self.shard_for(short_id) / f"{short_id}-preview.webm"
+
     def prepare_variant_dirs(self, short_id: str) -> None:
         self.content_file(short_id).parent.mkdir(parents=True, exist_ok=True)
         self.thumb_file(short_id).parent.mkdir(parents=True, exist_ok=True)

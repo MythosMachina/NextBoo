@@ -7,7 +7,7 @@ from typing import Literal
 
 from app.db import get_connection
 from app.pipeline import ProcessedImage, process_image
-from app.retag_existing import retag_existing
+from app.retag_existing import backfill_preview_variants, retag_existing
 from app.settings import get_settings
 from app.storage import StorageService
 from app.tagger import build_tagger
@@ -41,7 +41,7 @@ VISIBLE_STATUS_ENUM = "VISIBLE"
 HIDDEN_STATUS_ENUM = "HIDDEN"
 NEAR_DUPLICATE_STATUS_OPEN = "open"
 
-MaintenanceAction = Literal["retag_all"]
+MaintenanceAction = Literal["retag_all", "preview_backfill"]
 
 
 def normalize_rule_rating(value: object) -> str:
@@ -157,12 +157,12 @@ class WorkerService:
 
     def handle_maintenance(self, payload: dict[str, object]) -> None:
         action = str(payload.get("action", "")).strip().lower()
-        if action != "retag_all":
+        if action not in {"retag_all", "preview_backfill"}:
             logger.warning("ignored unknown maintenance action action=%s payload=%s", action, payload)
             return
 
-        self.redis.delete(self.settings.maintenance_pending_key)
-        self.redis.set(self.settings.maintenance_running_key, self.worker_id, ex=86400)
+        self.redis.delete(self.settings.maintenance_pending_key_for_action(action))
+        self.redis.set(self.settings.maintenance_running_key_for_action(action), self.worker_id, ex=86400)
         requested_by_username = str(payload.get("requested_by_username", "unknown"))
         logger.warning(
             "starting maintenance action=%s provider=%s requested_by=%s",
@@ -171,7 +171,10 @@ class WorkerService:
             requested_by_username,
         )
         try:
-            processed, failed = retag_existing()
+            if action == "retag_all":
+                processed, failed = retag_existing()
+            else:
+                processed, failed = backfill_preview_variants()
             logger.warning(
                 "completed maintenance action=%s provider=%s processed=%s failed=%s",
                 action,
@@ -180,7 +183,7 @@ class WorkerService:
                 failed,
             )
         finally:
-            self.redis.delete(self.settings.maintenance_running_key)
+            self.redis.delete(self.settings.maintenance_running_key_for_action(action))
 
     def handle_job(self, job_id: int) -> None:
         with get_connection() as conn:
@@ -261,6 +264,8 @@ class WorkerService:
                 if duplicate:
                     processed.original_path.unlink(missing_ok=True)
                     processed.thumb_path.unlink(missing_ok=True)
+                    if processed.preview_path:
+                        processed.preview_path.unlink(missing_ok=True)
                     self._record_outcome(
                         outcome="duplicate",
                         job_id=job["id"],
@@ -360,6 +365,21 @@ class WorkerService:
                         min(processed.height, self.settings.thumb_max_edge),
                     ),
                 )
+                if processed.preview_path and processed.preview_size and processed.preview_mime_type:
+                    cur.execute(
+                        """
+                        INSERT INTO image_variants (image_id, variant_type, relative_path, mime_type, file_size, width, height, created_at)
+                        VALUES (%s, 'PREVIEW'::variant_type, %s, %s, %s, %s, %s, NOW())
+                        """,
+                        (
+                            processed.image_id,
+                            str(processed.preview_path.relative_to(self.storage.thumb_path.parent)),
+                            processed.preview_mime_type,
+                            processed.preview_size,
+                            processed.preview_width or min(processed.width, self.settings.thumb_max_edge),
+                            processed.preview_height or min(processed.height, self.settings.thumb_max_edge),
+                        ),
+                    )
                 self._upsert_tags(cur, processed)
                 self._apply_danger_tags(cur, processed)
                 self._register_near_duplicates(cur, processed)

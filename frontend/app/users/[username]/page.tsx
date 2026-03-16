@@ -20,7 +20,9 @@ type UserProfile = {
     rating: "general" | "sensitive" | "questionable" | "explicit";
     processing_status: string;
     created_at: string;
-    thumb_url: string | null;
+  thumb_url: string | null;
+  preview_url?: string | null;
+  preview_mime_type?: string | null;
   }>;
   meta: {
     count: number;
@@ -92,8 +94,22 @@ export default function UserProfilePage() {
                 <a className="thumb-frame" href={`/posts/${post.id}`}>
                   <span className={`rating rating-${ratingCode(post.rating)}`}>{ratingCode(post.rating)}</span>
                   {post.thumb_url ? (
-                    // eslint-disable-next-line @next/next/no-img-element
-                    <img alt={post.original_filename} className="thumb-image" loading="lazy" src={post.thumb_url} />
+                    <>
+                      {/* eslint-disable-next-line @next/next/no-img-element */}
+                      <img alt={post.original_filename} className="thumb-image" loading="lazy" src={post.thumb_url} />
+                      {post.preview_url ? (
+                        <video
+                          autoPlay
+                          aria-hidden="true"
+                          className="thumb-preview"
+                          loop
+                          muted
+                          playsInline
+                          preload="none"
+                          src={post.preview_url}
+                        />
+                      ) : null}
+                    </>
                   ) : (
                     <div className="thumb-art" />
                   )}

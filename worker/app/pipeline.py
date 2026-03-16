@@ -33,8 +33,13 @@ class ProcessedImage:
     perceptual_hash: str
     original_path: Path
     thumb_path: Path
+    preview_path: Path | None
     original_size: int
     thumb_size: int
+    preview_size: int | None
+    preview_width: int | None
+    preview_height: int | None
+    preview_mime_type: str | None
     storage_ext: str
     original_mime_type: str
     processed_at: datetime
@@ -54,6 +59,30 @@ def generate_thumbnail(source_png: Path, target_webp: Path, max_edge: int) -> tu
         image.thumbnail((max_edge, max_edge))
         image.save(target_webp, format="WEBP", quality=85, method=6)
         return image.width, image.height
+
+
+def probe_visual_dimensions(source_path: Path) -> tuple[int | None, int | None]:
+    command = [
+        "ffprobe",
+        "-v",
+        "error",
+        "-select_streams",
+        "v:0",
+        "-show_entries",
+        "stream=width,height",
+        "-of",
+        "csv=p=0:s=x",
+        str(source_path),
+    ]
+    try:
+        result = subprocess.run(command, check=True, capture_output=True, text=True)
+        raw = result.stdout.strip()
+        if not raw or "x" not in raw:
+            return None, None
+        width_raw, height_raw = raw.split("x", 1)
+        return int(width_raw), int(height_raw)
+    except Exception:
+        return None, None
 
 
 def compute_perceptual_hash(source_png: Path) -> str:
@@ -233,10 +262,11 @@ def process_animated_or_video(
     local_input: Path,
     original_path: Path,
     thumb_path: Path,
+    preview_path: Path,
     workdir: Path,
     thumb_max_edge: int,
     tagger: Tagger,
-) -> tuple[int, int, str, TagPrediction]:
+) -> tuple[int, int, str, TagPrediction, int | None, int | None, int | None, str | None]:
     shutil.copy2(local_input, original_path)
     frame_positions = [0.0, 0.25, 0.5, 0.75, 1.0]
     extracted_frames: list[Path] = []
@@ -257,7 +287,46 @@ def process_animated_or_video(
     tag_prediction = merge_predictions(predictions)
     for extracted_frame in extracted_frames:
         extracted_frame.unlink(missing_ok=True)
-    return width, height, perceptual_hash, tag_prediction
+    preview_width, preview_height, preview_size, preview_mime_type = generate_motion_preview(local_input, preview_path, thumb_max_edge)
+    return width, height, perceptual_hash, tag_prediction, preview_width, preview_height, preview_size, preview_mime_type
+
+
+def generate_motion_preview(
+    source_path: Path,
+    target_path: Path,
+    max_edge: int,
+) -> tuple[int | None, int | None, int | None, str | None]:
+    target_path.parent.mkdir(parents=True, exist_ok=True)
+    scale_filter = (
+        f"fps=10,scale='if(gt(iw,ih),min(iw,{max_edge}),-2)':'if(gt(iw,ih),-2,min(ih,{max_edge}))':flags=lanczos"
+    )
+    command = [
+        "ffmpeg",
+        "-y",
+        "-i",
+        str(source_path),
+        "-an",
+        "-t",
+        "3",
+        "-vf",
+        scale_filter,
+        "-c:v",
+        "libvpx-vp9",
+        "-b:v",
+        "0",
+        "-crf",
+        "40",
+        str(target_path),
+    ]
+    try:
+        subprocess.run(command, check=True, capture_output=True, text=True)
+    except subprocess.CalledProcessError:
+        target_path.unlink(missing_ok=True)
+        return None, None, None, None
+    if not target_path.exists():
+        return None, None, None, None
+    width, height = probe_visual_dimensions(target_path)
+    return width, height, target_path.stat().st_size, "video/webm"
 
 
 def predict_existing_animated_or_video(
@@ -308,6 +377,7 @@ def process_image(
     original_mime_type = original_mime_for_suffix(source_suffix if treat_as_motion else ".png")
     original_path = storage.content_file(uuid_short, storage_ext)
     thumb_path = storage.thumb_file(uuid_short)
+    preview_path = storage.preview_file(uuid_short) if treat_as_motion else None
     media_metadata = probe_media_metadata(local_input) if treat_as_motion else {
         "duration_seconds": None,
         "frame_rate": None,
@@ -316,13 +386,17 @@ def process_image(
         "audio_codec": None,
     }
     if treat_as_motion:
-        width, height, perceptual_hash, tag_prediction = process_animated_or_video(
-            local_input, original_path, thumb_path, workdir, thumb_max_edge, tagger
+        width, height, perceptual_hash, tag_prediction, preview_width, preview_height, preview_size, preview_mime_type = process_animated_or_video(
+            local_input, original_path, thumb_path, preview_path, workdir, thumb_max_edge, tagger
         )
     else:
         width, height, perceptual_hash, tag_prediction = process_static_image(
             local_input, original_path, thumb_path, thumb_max_edge, tagger
         )
+        preview_width = None
+        preview_height = None
+        preview_size = None
+        preview_mime_type = None
     with Image.open(thumb_path) as thumb_image:
         thumb_width, thumb_height = thumb_image.width, thumb_image.height
     source_hash = storage.sha256_for_file(local_input)
@@ -352,8 +426,13 @@ def process_image(
         perceptual_hash=perceptual_hash,
         original_path=original_path,
         thumb_path=thumb_path,
+        preview_path=preview_path,
         original_size=original_path.stat().st_size,
         thumb_size=thumb_path.stat().st_size,
+        preview_size=preview_size,
+        preview_width=preview_width,
+        preview_height=preview_height,
+        preview_mime_type=preview_mime_type,
         storage_ext=storage_ext,
         original_mime_type=original_mime_type,
         processed_at=processed_at,

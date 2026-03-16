@@ -121,6 +121,8 @@ class PublicUserProfileImage(BaseModel):
     created_at: datetime
     visibility_status: VisibilityStatus = VisibilityStatus.VISIBLE
     thumb_url: str | None = None
+    preview_url: str | None = None
+    preview_mime_type: str | None = None
 
 
 class PublicUserProfileEnvelope(BaseModel):

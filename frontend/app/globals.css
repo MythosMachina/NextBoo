@@ -766,6 +766,24 @@ code {
   background: var(--panel-soft);
 }
 
+.thumb-preview {
+  position: absolute;
+  inset: 0;
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 120ms ease;
+  background: var(--panel-soft);
+}
+
+.thumb-frame:hover .thumb-preview,
+.thumb-frame:focus-visible .thumb-preview {
+  opacity: 1;
+}
+
 :root[data-theme="dark"] .thumb-art {
   background:
     linear-gradient(180deg, rgba(255, 255, 255, 0.08), transparent 34%),

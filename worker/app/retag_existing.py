@@ -7,6 +7,7 @@ from pathlib import Path
 
 from app.db import get_connection
 from app.pipeline import (
+    generate_motion_preview,
     is_animated_webp,
     predict_existing_animated_or_video,
     predict_existing_static_image,
@@ -33,6 +34,7 @@ DEFAULT_RATING_RULE_BOOSTS = {
 }
 
 AUTO_TAG_SOURCE_ENUM = "AUTO"
+PREVIEW_VARIANT_ENUM = "PREVIEW"
 
 
 def normalize_rule_rating(value: object) -> str:
@@ -248,6 +250,98 @@ def retag_existing(limit: int | None = None, image_id: str | None = None) -> tup
 
         with conn.cursor() as cur:
             prune_orphan_tags(cur)
+        conn.commit()
+
+    return processed, failed
+
+
+def backfill_preview_variants(limit: int | None = None, image_id: str | None = None) -> tuple[int, int]:
+    storage = StorageService()
+    storage.ensure_dirs()
+    settings = get_settings()
+    processed = 0
+    failed = 0
+
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            query = """
+                SELECT i.id, i.uuid_short, i.width, i.height, iv.relative_path
+                FROM images i
+                JOIN image_variants iv
+                  ON iv.image_id = i.id
+                 AND iv.variant_type = 'ORIGINAL'::variant_type
+                LEFT JOIN image_variants pv
+                  ON pv.image_id = i.id
+                 AND pv.variant_type = 'PREVIEW'::variant_type
+                WHERE pv.id IS NULL
+                  AND EXISTS (
+                    SELECT 1
+                    FROM image_tags it
+                    JOIN tags t ON t.id = it.tag_id
+                    WHERE it.image_id = i.id
+                      AND it.source = 'SYSTEM'::tag_source
+                      AND t.name_normalized IN ('animated', 'video')
+                  )
+            """
+            params: list[object] = []
+            if image_id:
+                query += " AND i.id = %s"
+                params.append(image_id)
+            query += " ORDER BY i.created_at ASC"
+            if limit is not None and not image_id:
+                query += " LIMIT %s"
+                params.append(limit)
+
+            cur.execute(query, params)
+            rows = cur.fetchall()
+
+        for row in rows:
+            try:
+                source_path = resolve_source_path(storage, row["relative_path"])
+                if not source_path.exists():
+                    logger.warning("preview backfill skipped missing source image_id=%s path=%s", row["id"], source_path)
+                    failed += 1
+                    continue
+
+                preview_path = storage.preview_file(row["uuid_short"])
+                preview_path.unlink(missing_ok=True)
+                preview_width, preview_height, preview_size, preview_mime_type = generate_motion_preview(
+                    source_path,
+                    preview_path,
+                    settings.thumb_max_edge,
+                )
+                if not preview_path.exists() or not preview_size or not preview_mime_type:
+                    logger.warning("preview backfill could not generate preview image_id=%s path=%s", row["id"], source_path)
+                    failed += 1
+                    preview_path.unlink(missing_ok=True)
+                    continue
+
+                with conn.cursor() as cur:
+                    cur.execute(
+                        """
+                        INSERT INTO image_variants (image_id, variant_type, relative_path, mime_type, file_size, width, height, created_at)
+                        VALUES (%s, %s::variant_type, %s, %s, %s, %s, %s, NOW())
+                        """,
+                        (
+                            row["id"],
+                            PREVIEW_VARIANT_ENUM,
+                            str(preview_path.relative_to(storage.thumb_path.parent)),
+                            preview_mime_type,
+                            preview_size,
+                            preview_width or min(row["width"], settings.thumb_max_edge),
+                            preview_height or min(row["height"], settings.thumb_max_edge),
+                        ),
+                    )
+                processed += 1
+                if processed % 50 == 0:
+                    conn.commit()
+                    logger.info("preview backfill progress processed=%s failed=%s", processed, failed)
+            except Exception:
+                conn.rollback()
+                failed += 1
+                logger.exception("preview backfill failed image_id=%s", row["id"])
+                continue
+
         conn.commit()
 
     return processed, failed

@@ -141,6 +141,7 @@ def ensure_runtime_auto_tagger_schema(engine: Engine) -> None:
         statements.append("ALTER TABLE images ADD COLUMN audio_codec VARCHAR(64)")
     statements.append("ALTER TYPE tag_source RENAME VALUE 'WD' TO 'AUTO'")
     statements.append("ALTER TYPE tag_source RENAME VALUE 'wd' TO 'AUTO'")
+    statements.append("ALTER TYPE variant_type ADD VALUE IF NOT EXISTS 'PREVIEW'")
     if "app_settings" in tables:
         statements.append(
             """

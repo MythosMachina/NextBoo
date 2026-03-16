@@ -102,6 +102,7 @@ class UploadRequestStatus(StrEnum):
 class VariantType(StrEnum):
     ORIGINAL = "original"
     THUMB = "thumb"
+    PREVIEW = "preview"
 
 
 SYSTEM_TAGS = {"image", "animated", "video"}

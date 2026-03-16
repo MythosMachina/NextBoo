@@ -2,7 +2,7 @@ from pathlib import Path
 from typing import Annotated
 
 from app.api.deps import DbSession, get_current_user, get_current_user_raw, get_optional_current_user, require_roles
-from app.core.constants import ProcessingStatus, Rating, UserRole
+from app.core.constants import ProcessingStatus, Rating, UserRole, VariantType
 from app.core.security import hash_password, verify_password
 from app.models.backup_export import BackupExport
 from app.models.image import Image
@@ -25,7 +25,7 @@ from app.schemas.user import (
 )
 from app.services.admin_users import email_is_banned, generate_temp_password
 from app.services.backup_exports import EXPORT_ROOT, list_backup_exports_for_user, queue_backup_export, reactivate_tos_account
-from app.services.media import build_media_url, thumb_url_for_image
+from app.services.media import build_media_url, preview_url_for_image, thumb_url_for_image
 from app.services.social_gate import ban_user_with_enforcement, can_manage_target, count_used_invites, count_user_strikes
 from app.services.tos import get_current_tos_version, user_requires_tos_acceptance
 from app.services.deletion import hard_delete_image
@@ -114,6 +114,9 @@ def get_public_profile(
     for image in uploads:
         item = PublicUserProfileImage.model_validate(image)
         item.thumb_url = thumb_url_for_image(image)
+        item.preview_url = preview_url_for_image(image)
+        preview_variant = next((variant for variant in image.variants if variant.variant_type == VariantType.PREVIEW), None)
+        item.preview_mime_type = preview_variant.mime_type if preview_variant else None
         item.visibility_status = resolve_visibility_status(image)
         upload_items.append(item)
 
@@ -143,6 +146,9 @@ def get_my_uploads(
     for image in uploads:
         item = PublicUserProfileImage.model_validate(image)
         item.thumb_url = thumb_url_for_image(image)
+        item.preview_url = preview_url_for_image(image)
+        preview_variant = next((variant for variant in image.variants if variant.variant_type == VariantType.PREVIEW), None)
+        item.preview_mime_type = preview_variant.mime_type if preview_variant else None
         item.visibility_status = resolve_visibility_status(image)
         upload_items.append(item)
 

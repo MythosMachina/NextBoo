@@ -1,7 +1,7 @@
 from typing import Annotated
 
 from app.api.deps import DbSession, RedisClient, get_optional_current_user
-from app.core.constants import ProcessingStatus
+from app.core.constants import ProcessingStatus, VariantType
 from app.models.image import Image, ImageTag
 from app.models.tag import Tag, TagAlias
 from app.models.user import User
@@ -11,7 +11,7 @@ from app.services.visibility import apply_public_image_visibility
 from fastapi import APIRouter, Depends, Query, Request
 from sqlalchemy import and_, desc
 from sqlalchemy.orm import selectinload
-from app.services.media import thumb_url_for_image
+from app.services.media import preview_url_for_image, thumb_url_for_image
 from app.schemas.image import ImageListItem, ImageListResponse
 
 router = APIRouter(prefix="/search")
@@ -90,6 +90,9 @@ def search_images(
     for image in images:
         item = ImageListItem.model_validate(image)
         item.thumb_url = thumb_url_for_image(image)
+        item.preview_url = preview_url_for_image(image)
+        preview_variant = next((variant for variant in image.variants if variant.variant_type == VariantType.PREVIEW), None)
+        item.preview_mime_type = preview_variant.mime_type if preview_variant else None
         items.append(item)
     return ImageListResponse(
         data=items,

@@ -8,6 +8,8 @@ type TaggerSettings = {
   provider: string;
   retag_all_running: boolean;
   retag_all_pending: boolean;
+  preview_backfill_running: boolean;
+  preview_backfill_pending: boolean;
   near_duplicate_hamming_threshold: number;
 };
 
@@ -15,6 +17,8 @@ const DEFAULT_SETTINGS: TaggerSettings = {
   provider: "camie",
   retag_all_running: false,
   retag_all_pending: false,
+  preview_backfill_running: false,
+  preview_backfill_pending: false,
   near_duplicate_hamming_threshold: 6,
 };
 
@@ -22,6 +26,7 @@ export default function AdminTaggerSettingsPage() {
   const [settings, setSettings] = useState<TaggerSettings>(DEFAULT_SETTINGS);
   const [loading, setLoading] = useState(true);
   const [queueingRetag, setQueueingRetag] = useState(false);
+  const [queueingPreviewBackfill, setQueueingPreviewBackfill] = useState(false);
   const [savingThreshold, setSavingThreshold] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -102,6 +107,36 @@ export default function AdminTaggerSettingsPage() {
     setMessage("Prune-and-retag queued for Camie Tagger.");
   }
 
+  async function handlePreviewBackfill() {
+    if (
+      !window.confirm(
+        "Generate hover previews for existing animations and videos that do not have one yet?"
+      )
+    ) {
+      return;
+    }
+
+    setQueueingPreviewBackfill(true);
+    setMessage(null);
+    setError(null);
+
+    const response = await authFetch("/api/v1/admin/settings/tagger/backfill-previews", {
+      method: "POST",
+    });
+
+    setQueueingPreviewBackfill(false);
+    if (!response.ok) {
+      const payload = await response.json().catch(() => null);
+      setError(payload?.detail ?? "Failed to queue preview backfill.");
+      await reloadSettings();
+      return;
+    }
+
+    const payload = await response.json();
+    setSettings(payload.data);
+    setMessage("Preview backfill queued for existing animations and videos.");
+  }
+
   return (
     <AdminShell
       title="Tagger Maintenance"
@@ -124,6 +159,14 @@ export default function AdminTaggerSettingsPage() {
               {settings.retag_all_running
                 ? "Running"
                 : settings.retag_all_pending
+                  ? "Queued"
+                  : "Idle"}
+            </div>
+            <div className="inline-form-note">
+              <strong>Preview backfill:</strong>{" "}
+              {settings.preview_backfill_running
+                ? "Running"
+                : settings.preview_backfill_pending
                   ? "Queued"
                   : "Idle"}
             </div>
@@ -157,6 +200,20 @@ export default function AdminTaggerSettingsPage() {
                   : settings.retag_all_pending
                     ? "Retag queued"
                     : "Prune All Tags and Retag"}
+            </button>
+            <button
+              className="secondary-button"
+              disabled={queueingPreviewBackfill || settings.preview_backfill_running || settings.preview_backfill_pending}
+              onClick={handlePreviewBackfill}
+              type="button"
+            >
+              {queueingPreviewBackfill
+                ? "Queueing..."
+                : settings.preview_backfill_running
+                  ? "Preview backfill running"
+                  : settings.preview_backfill_pending
+                    ? "Preview backfill queued"
+                    : "Backfill Hover Previews"}
             </button>
             {message ? <p className="form-success">{message}</p> : null}
             {error ? <p className="form-error">{error}</p> : null}
