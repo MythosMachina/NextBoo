@@ -36,6 +36,19 @@ AUTOSCALER_DEFAULTS = {
     "autoscaler_max_workers": 4,
     "autoscaler_poll_seconds": 30,
 }
+UPLOAD_PIPELINE_STAGE_DEFAULTS = {
+    "scanning": {"label": "Scanning", "min_workers": 1, "max_workers": 6, "jobs_per_worker": 100},
+    "dedupe": {"label": "Dedupe", "min_workers": 1, "max_workers": 4, "jobs_per_worker": 200},
+    "normalize": {"label": "Normalize", "min_workers": 1, "max_workers": 8, "jobs_per_worker": 40},
+    "dispatch": {"label": "Dispatch", "min_workers": 1, "max_workers": 3, "jobs_per_worker": 150},
+    "ingest_image": {"label": "Final Ingest Image", "min_workers": 1, "max_workers": 8, "jobs_per_worker": 25},
+    "ingest_video": {"label": "Final Ingest Video", "min_workers": 1, "max_workers": 4, "jobs_per_worker": 4},
+}
+UPLOAD_PIPELINE_BALANCER_DEFAULTS = {
+    "upload_pipeline_balancer_enabled": 1,
+    "upload_pipeline_balancer_poll_seconds": 5,
+    "upload_pipeline_balancer_flexible_slots": 0,
+}
 TOS_TITLE_KEY = "tos_title"
 TOS_PARAGRAPHS_KEY = "tos_paragraphs"
 DEFAULT_TOS_TITLE = "NextBoo Terms of Service"
@@ -83,6 +96,30 @@ def ensure_autoscaler_settings(db: Session) -> None:
             continue
         db.add(AppSetting(key=key, value=str(default_value)))
         changed = True
+    if changed:
+        db.commit()
+
+
+def upload_pipeline_stage_setting_key(stage: str, key: str) -> str:
+    return f"upload_pipeline_stage_{stage}_{key}"
+
+
+def ensure_upload_pipeline_balancer_settings(db: Session) -> None:
+    changed = False
+    for key, default_value in UPLOAD_PIPELINE_BALANCER_DEFAULTS.items():
+        setting = db.query(AppSetting).filter(AppSetting.key == key).first()
+        if setting:
+            continue
+        db.add(AppSetting(key=key, value=str(default_value)))
+        changed = True
+    for stage, defaults in UPLOAD_PIPELINE_STAGE_DEFAULTS.items():
+        for field in ("min_workers", "max_workers", "jobs_per_worker"):
+            key = upload_pipeline_stage_setting_key(stage, field)
+            setting = db.query(AppSetting).filter(AppSetting.key == key).first()
+            if setting:
+                continue
+            db.add(AppSetting(key=key, value=str(defaults[field])))
+            changed = True
     if changed:
         db.commit()
 
@@ -163,6 +200,38 @@ def get_autoscaler_settings(db: Session) -> dict[str, int | bool]:
         "autoscaler_min_workers": max(int(values.get("autoscaler_min_workers", "1")), 1),
         "autoscaler_max_workers": max(int(values.get("autoscaler_max_workers", "4")), 1),
         "autoscaler_poll_seconds": max(int(values.get("autoscaler_poll_seconds", "30")), 5),
+    }
+
+
+def get_upload_pipeline_balancer_settings(db: Session) -> dict[str, object]:
+    ensure_upload_pipeline_balancer_settings(db)
+    keys = list(UPLOAD_PIPELINE_BALANCER_DEFAULTS.keys())
+    for stage in UPLOAD_PIPELINE_STAGE_DEFAULTS:
+        for field in ("min_workers", "max_workers", "jobs_per_worker"):
+            keys.append(upload_pipeline_stage_setting_key(stage, field))
+    rows = db.query(AppSetting).filter(AppSetting.key.in_(tuple(keys))).all()
+    values = {row.key: row.value for row in rows}
+    stages: list[dict[str, object]] = []
+    for stage, defaults in UPLOAD_PIPELINE_STAGE_DEFAULTS.items():
+        min_workers = max(int(values.get(upload_pipeline_stage_setting_key(stage, "min_workers"), str(defaults["min_workers"]))), 1)
+        max_workers = max(int(values.get(upload_pipeline_stage_setting_key(stage, "max_workers"), str(defaults["max_workers"]))), 1)
+        jobs_per_worker = max(int(values.get(upload_pipeline_stage_setting_key(stage, "jobs_per_worker"), str(defaults["jobs_per_worker"]))), 1)
+        if max_workers < min_workers:
+            max_workers = min_workers
+        stages.append(
+            {
+                "stage": stage,
+                "label": defaults["label"],
+                "min_workers": min_workers,
+                "max_workers": max_workers,
+                "jobs_per_worker": jobs_per_worker,
+            }
+        )
+    return {
+        "upload_pipeline_balancer_enabled": True,
+        "upload_pipeline_balancer_poll_seconds": max(int(values.get("upload_pipeline_balancer_poll_seconds", "5")), 5),
+        "upload_pipeline_balancer_flexible_slots": 0,
+        "stages": stages,
     }
 
 
@@ -325,3 +394,46 @@ def update_autoscaler_settings(db: Session, updates: dict[str, int | bool]) -> d
         )
         settings = get_autoscaler_settings(db)
     return settings
+
+
+def update_upload_pipeline_balancer_settings(db: Session, updates: dict[str, object]) -> dict[str, object]:
+    ensure_upload_pipeline_balancer_settings(db)
+    scalar_updates = {
+        "upload_pipeline_balancer_enabled": updates.get("upload_pipeline_balancer_enabled"),
+        "upload_pipeline_balancer_poll_seconds": updates.get("upload_pipeline_balancer_poll_seconds"),
+        "upload_pipeline_balancer_flexible_slots": updates.get("upload_pipeline_balancer_flexible_slots"),
+    }
+    for key, value in scalar_updates.items():
+        if value is None:
+            continue
+        setting = db.query(AppSetting).filter(AppSetting.key == key).first()
+        if not setting:
+            setting = AppSetting(key=key, value="1" if value else "0" if isinstance(value, bool) else str(value))
+        else:
+            setting.value = "1" if value else "0" if isinstance(value, bool) else str(value)
+        db.add(setting)
+
+    for stage_update in updates.get("stages", []):
+        stage = str(stage_update.get("stage") or "").strip()
+        if stage not in UPLOAD_PIPELINE_STAGE_DEFAULTS:
+            continue
+        min_workers = max(int(stage_update.get("min_workers", 1)), 1)
+        max_workers = max(int(stage_update.get("max_workers", 1)), 1)
+        jobs_per_worker = max(int(stage_update.get("jobs_per_worker", 1)), 1)
+        if max_workers < min_workers:
+            max_workers = min_workers
+        for field, value in (
+            ("min_workers", min_workers),
+            ("max_workers", max_workers),
+            ("jobs_per_worker", jobs_per_worker),
+        ):
+            key = upload_pipeline_stage_setting_key(stage, field)
+            setting = db.query(AppSetting).filter(AppSetting.key == key).first()
+            if not setting:
+                setting = AppSetting(key=key, value=str(value))
+            else:
+                setting.value = str(value)
+            db.add(setting)
+
+    db.commit()
+    return get_upload_pipeline_balancer_settings(db)

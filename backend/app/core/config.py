@@ -25,6 +25,7 @@ class Settings(BaseSettings):
     redis_port: int = Field(default=6379, alias="REDIS_PORT")
 
     queue_path: str = Field(default="/app/queue", alias="QUEUE_PATH")
+    quarantine_path: str = Field(default="/app/quarantine", alias="QUARANTINE_PATH")
     processing_path: str = Field(default="/app/processing", alias="PROCESSING_PATH")
     processing_failed_path: str = Field(default="/app/processing_failed", alias="PROCESSING_FAILED_PATH")
     content_path: str = Field(default="/app/content", alias="CONTENT_PATH")

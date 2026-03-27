@@ -69,6 +69,18 @@ class WorkerService:
             datetime.now(timezone.utc).isoformat(),
             ex=self.settings.worker_presence_ttl_seconds,
         )
+        if self.settings.ingest_queue_name == "jobs:ingest:video":
+            self.redis.set(
+                f"nextboo:workers:video:active:{self.worker_id}",
+                datetime.now(timezone.utc).isoformat(),
+                ex=self.settings.worker_presence_ttl_seconds,
+            )
+        else:
+            self.redis.set(
+                f"nextboo:workers:image:active:{self.worker_id}",
+                datetime.now(timezone.utc).isoformat(),
+                ex=self.settings.worker_presence_ttl_seconds,
+            )
 
     def poll_job(self, timeout_seconds: int = 5) -> tuple[str, int | dict[str, object]] | None:
         item = self.redis.blpop([self.settings.maintenance_queue_name, self.settings.ingest_queue_name], timeout=timeout_seconds)
@@ -204,6 +216,7 @@ class WorkerService:
         if not job:
             logger.info("job already claimed or unavailable job_id=%s", job_id)
             return
+        self._mark_upload_pipeline_item_processing(job["id"])
 
         queue_path = job["queue_path"]
         heartbeat_stop = threading.Event()
@@ -290,6 +303,13 @@ class WorkerService:
                             """,
                             (job["import_batch_id"],),
                         )
+                    self._complete_upload_pipeline_item(
+                        cur,
+                        job["id"],
+                        status="duplicate",
+                        detail_message=f"Matched existing image {duplicate['id']}",
+                        image_id=str(duplicate["id"]),
+                    )
                     self._prune_completed_job(cur, job["id"], job["import_batch_id"])
                     conn.commit()
                     self.redis.publish("jobs:events", json.dumps({"job_id": job["id"], "status": "done"}))
@@ -403,6 +423,13 @@ class WorkerService:
                         """,
                         (job["import_batch_id"],),
                     )
+                self._complete_upload_pipeline_item(
+                    cur,
+                    job["id"],
+                    status="completed",
+                    detail_message="Image accepted and displayed.",
+                    image_id=processed.image_id,
+                )
                 self._prune_completed_job(cur, job["id"], job["import_batch_id"])
                 conn.commit()
                 self._record_outcome(
@@ -616,6 +643,7 @@ class WorkerService:
                         (job["import_batch_id"],),
                     )
                 conn.commit()
+                self._fail_upload_pipeline_item(job["id"], error_message)
                 self._record_outcome(
                     outcome="failed",
                     job_id=job["id"],
@@ -650,6 +678,7 @@ class WorkerService:
                         (job["import_batch_id"],),
                     )
                 conn.commit()
+                self._fail_upload_pipeline_item(job["id"], error_message)
                 self._record_outcome(
                     outcome="failed",
                     job_id=job["id"],
@@ -738,6 +767,7 @@ class WorkerService:
         cur.execute("DELETE FROM jobs WHERE id = %s", (job["id"],))
         if job["import_batch_id"] is not None:
             self._reconcile_import(cur, job["import_batch_id"])
+        self._complete_upload_pipeline_item(cur, job["id"], status="failed", detail_message=message, image_id=None)
         self._record_outcome(
             outcome="failed",
             job_id=job["id"],
@@ -746,6 +776,92 @@ class WorkerService:
             image_id=None,
         )
         self.redis.publish("jobs:events", json.dumps({"job_id": job["id"], "status": "dropped"}))
+
+    def _mark_upload_pipeline_item_processing(self, job_id: int) -> None:
+        with get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE upload_pipeline_items
+                    SET status = 'processing',
+                        detail_message = 'Processing in ingest worker.',
+                        updated_at = NOW()
+                    WHERE linked_job_id = %s
+                    RETURNING batch_id
+                    """,
+                    (job_id,),
+                )
+                row = cur.fetchone()
+                if row:
+                    self._sync_upload_pipeline_batch(cur, row["batch_id"])
+                conn.commit()
+
+    def _complete_upload_pipeline_item(self, cur, job_id: int, *, status: str, detail_message: str, image_id: str | None) -> None:
+        cur.execute(
+            """
+            UPDATE upload_pipeline_items
+            SET status = %s,
+                linked_image_id = COALESCE(%s, linked_image_id),
+                detail_message = %s,
+                updated_at = NOW()
+            WHERE linked_job_id = %s
+            RETURNING batch_id
+            """,
+            (status, image_id, detail_message, job_id),
+        )
+        row = cur.fetchone()
+        if row:
+            self._sync_upload_pipeline_batch(cur, row["batch_id"])
+
+    def _fail_upload_pipeline_item(self, job_id: int, message: str) -> None:
+        with get_connection() as conn:
+            with conn.cursor() as cur:
+                self._complete_upload_pipeline_item(cur, job_id, status="failed", detail_message=message, image_id=None)
+                conn.commit()
+
+    def _sync_upload_pipeline_batch(self, cur, batch_id: int) -> None:
+        cur.execute(
+            """
+            SELECT status, COUNT(*) AS count
+            FROM upload_pipeline_items
+            WHERE batch_id = %s
+            GROUP BY status
+            """,
+            (batch_id,),
+        )
+        rows = cur.fetchall()
+        counts = {str(row["status"]): int(row["count"]) for row in rows}
+        total_items = sum(counts.values())
+        completed_items = counts.get("completed", 0)
+        duplicate_items = counts.get("duplicate", 0)
+        rejected_items = counts.get("rejected", 0)
+        failed_items = counts.get("failed", 0)
+        active_count = counts.get("received", 0) + counts.get("queued", 0) + counts.get("running", 0) + counts.get("ready", 0) + counts.get("dispatched", 0) + counts.get("processing", 0)
+        if total_items and completed_items + duplicate_items + rejected_items + failed_items >= total_items:
+            status = "completed" if failed_items == 0 else "failed"
+            finished_at_sql = "NOW()"
+        elif active_count:
+            status = "running"
+            finished_at_sql = "NULL"
+        else:
+            status = "received"
+            finished_at_sql = "NULL"
+
+        cur.execute(
+            f"""
+            UPDATE upload_pipeline_batches
+            SET total_items = %s,
+                completed_items = %s,
+                duplicate_items = %s,
+                rejected_items = %s,
+                failed_items = %s,
+                status = %s,
+                finished_at = {finished_at_sql},
+                updated_at = NOW()
+            WHERE id = %s
+            """,
+            (total_items, completed_items, duplicate_items, rejected_items, failed_items, status, batch_id),
+        )
 
     def _reconcile_import(self, cur, import_batch_id: int) -> None:
         cur.execute(

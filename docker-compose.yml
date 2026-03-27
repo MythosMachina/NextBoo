@@ -32,6 +32,7 @@ services:
       REDIS_HOST: ${REDIS_HOST:-redis}
       REDIS_PORT: ${REDIS_PORT:-6379}
       QUEUE_PATH: ${QUEUE_PATH:-/app/queue}
+      QUARANTINE_PATH: ${QUARANTINE_PATH:-/app/quarantine}
       PROCESSING_PATH: ${PROCESSING_PATH:-/app/processing}
       PROCESSING_FAILED_PATH: ${PROCESSING_FAILED_PATH:-/app/processing_failed}
       CONTENT_PATH: ${CONTENT_PATH:-/app/content}
@@ -51,6 +52,7 @@ services:
       redis:
         condition: service_started
     volumes:
+      - upload_quarantine:/app/quarantine
       - ${GALLERY_ROOT:-./gallery}/queue:/app/queue
       - ${GALLERY_ROOT:-./gallery}/processing:/app/processing
       - ${GALLERY_ROOT:-./gallery}/processing_failed:/app/processing_failed
@@ -75,6 +77,7 @@ services:
       REDIS_HOST: ${REDIS_HOST:-redis}
       REDIS_PORT: ${REDIS_PORT:-6379}
       QUEUE_PATH: ${QUEUE_PATH:-/app/queue}
+      QUARANTINE_PATH: ${QUARANTINE_PATH:-/app/quarantine}
       PROCESSING_PATH: ${PROCESSING_PATH:-/app/processing}
       PROCESSING_FAILED_PATH: ${PROCESSING_FAILED_PATH:-/app/processing_failed}
       CONTENT_PATH: ${CONTENT_PATH:-/app/content}
@@ -95,6 +98,7 @@ services:
       redis:
         condition: service_started
     volumes:
+      - upload_quarantine:/app/quarantine
       - ${GALLERY_ROOT:-./gallery}/queue:/app/queue
       - ${GALLERY_ROOT:-./gallery}/processing:/app/processing
       - ${GALLERY_ROOT:-./gallery}/processing_failed:/app/processing_failed
@@ -102,6 +106,185 @@ services:
       - ${GALLERY_ROOT:-./gallery}/content_thumbs:/app/content_thumbs
       - ${GALLERY_ROOT:-./gallery}/imports:/app/imports
       - ${GALLERY_ROOT:-./gallery}/models:/models
+
+  worker_video:
+    build:
+      context: ./worker
+      dockerfile: Dockerfile
+    environment:
+      APP_ENV: ${APP_ENV:-development}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      PROJECT_NAME: ${PROJECT_NAME:-NextBoo}
+      POSTGRES_HOST: ${POSTGRES_HOST:-postgres}
+      POSTGRES_PORT: ${POSTGRES_PORT:-5432}
+      POSTGRES_DB: ${POSTGRES_DB:-nextboo}
+      POSTGRES_USER: ${POSTGRES_USER:-nextboo}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-nextboo}
+      REDIS_HOST: ${REDIS_HOST:-redis}
+      REDIS_PORT: ${REDIS_PORT:-6379}
+      QUEUE_PATH: ${QUEUE_PATH:-/app/queue}
+      QUARANTINE_PATH: ${QUARANTINE_PATH:-/app/quarantine}
+      PROCESSING_PATH: ${PROCESSING_PATH:-/app/processing}
+      PROCESSING_FAILED_PATH: ${PROCESSING_FAILED_PATH:-/app/processing_failed}
+      CONTENT_PATH: ${CONTENT_PATH:-/app/content}
+      THUMB_PATH: ${THUMB_PATH:-/app/content_thumbs}
+      IMPORT_PATH: ${IMPORT_PATH:-/app/imports}
+      MODEL_PATH: ${MODEL_PATH:-/models}
+      WORKER_CONCURRENCY: ${VIDEO_WORKER_CONCURRENCY:-1}
+      THUMB_MAX_EDGE: ${THUMB_MAX_EDGE:-250}
+      JOB_HEARTBEAT_SECONDS: ${JOB_HEARTBEAT_SECONDS:-30}
+      WORKER_PRESENCE_TTL_SECONDS: ${WORKER_PRESENCE_TTL_SECONDS:-120}
+      TAGGER_PROVIDER: camie
+      QUEUE_NAME: jobs:ingest:video
+    cpus: ${VIDEO_WORKER_CPU_LIMIT:-4}
+    mem_limit: ${VIDEO_WORKER_MEMORY_LIMIT:-8g}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_started
+    volumes:
+      - upload_quarantine:/app/quarantine
+      - ${GALLERY_ROOT:-./gallery}/queue:/app/queue
+      - ${GALLERY_ROOT:-./gallery}/processing:/app/processing
+      - ${GALLERY_ROOT:-./gallery}/processing_failed:/app/processing_failed
+      - ${GALLERY_ROOT:-./gallery}/content:/app/content
+      - ${GALLERY_ROOT:-./gallery}/content_thumbs:/app/content_thumbs
+      - ${GALLERY_ROOT:-./gallery}/imports:/app/imports
+      - ${GALLERY_ROOT:-./gallery}/models:/models
+
+  upload_scanner:
+    build:
+      context: ./worker
+      dockerfile: Dockerfile
+    command: ["python", "-m", "app.upload_pipeline_main"]
+    environment:
+      APP_ENV: ${APP_ENV:-development}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      PROJECT_NAME: ${PROJECT_NAME:-NextBoo}
+      POSTGRES_HOST: ${POSTGRES_HOST:-postgres}
+      POSTGRES_PORT: ${POSTGRES_PORT:-5432}
+      POSTGRES_DB: ${POSTGRES_DB:-nextboo}
+      POSTGRES_USER: ${POSTGRES_USER:-nextboo}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-nextboo}
+      REDIS_HOST: ${REDIS_HOST:-redis}
+      REDIS_PORT: ${REDIS_PORT:-6379}
+      QUARANTINE_PATH: ${QUARANTINE_PATH:-/app/quarantine}
+      QUEUE_PATH: ${QUEUE_PATH:-/app/queue}
+      PROCESSING_PATH: ${PROCESSING_PATH:-/app/processing}
+      PROCESSING_FAILED_PATH: ${PROCESSING_FAILED_PATH:-/app/processing_failed}
+      CONTENT_PATH: ${CONTENT_PATH:-/app/content}
+      THUMB_PATH: ${THUMB_PATH:-/app/content_thumbs}
+      IMPORT_PATH: ${IMPORT_PATH:-/app/imports}
+      MODEL_PATH: ${MODEL_PATH:-/models}
+      UPLOAD_PIPELINE_STAGE: scanning
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_started
+    volumes:
+      - upload_quarantine:/app/quarantine
+
+  upload_dedupe:
+    build:
+      context: ./worker
+      dockerfile: Dockerfile
+    command: ["python", "-m", "app.upload_pipeline_main"]
+    environment:
+      APP_ENV: ${APP_ENV:-development}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      PROJECT_NAME: ${PROJECT_NAME:-NextBoo}
+      POSTGRES_HOST: ${POSTGRES_HOST:-postgres}
+      POSTGRES_PORT: ${POSTGRES_PORT:-5432}
+      POSTGRES_DB: ${POSTGRES_DB:-nextboo}
+      POSTGRES_USER: ${POSTGRES_USER:-nextboo}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-nextboo}
+      REDIS_HOST: ${REDIS_HOST:-redis}
+      REDIS_PORT: ${REDIS_PORT:-6379}
+      QUARANTINE_PATH: ${QUARANTINE_PATH:-/app/quarantine}
+      QUEUE_PATH: ${QUEUE_PATH:-/app/queue}
+      PROCESSING_PATH: ${PROCESSING_PATH:-/app/processing}
+      PROCESSING_FAILED_PATH: ${PROCESSING_FAILED_PATH:-/app/processing_failed}
+      CONTENT_PATH: ${CONTENT_PATH:-/app/content}
+      THUMB_PATH: ${THUMB_PATH:-/app/content_thumbs}
+      IMPORT_PATH: ${IMPORT_PATH:-/app/imports}
+      MODEL_PATH: ${MODEL_PATH:-/models}
+      UPLOAD_PIPELINE_STAGE: dedupe
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_started
+    volumes:
+      - upload_quarantine:/app/quarantine
+
+  upload_normalizer:
+    build:
+      context: ./worker
+      dockerfile: Dockerfile
+    command: ["python", "-m", "app.upload_pipeline_main"]
+    environment:
+      APP_ENV: ${APP_ENV:-development}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      PROJECT_NAME: ${PROJECT_NAME:-NextBoo}
+      POSTGRES_HOST: ${POSTGRES_HOST:-postgres}
+      POSTGRES_PORT: ${POSTGRES_PORT:-5432}
+      POSTGRES_DB: ${POSTGRES_DB:-nextboo}
+      POSTGRES_USER: ${POSTGRES_USER:-nextboo}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-nextboo}
+      REDIS_HOST: ${REDIS_HOST:-redis}
+      REDIS_PORT: ${REDIS_PORT:-6379}
+      QUARANTINE_PATH: ${QUARANTINE_PATH:-/app/quarantine}
+      QUEUE_PATH: ${QUEUE_PATH:-/app/queue}
+      PROCESSING_PATH: ${PROCESSING_PATH:-/app/processing}
+      PROCESSING_FAILED_PATH: ${PROCESSING_FAILED_PATH:-/app/processing_failed}
+      CONTENT_PATH: ${CONTENT_PATH:-/app/content}
+      THUMB_PATH: ${THUMB_PATH:-/app/content_thumbs}
+      IMPORT_PATH: ${IMPORT_PATH:-/app/imports}
+      MODEL_PATH: ${MODEL_PATH:-/models}
+      UPLOAD_PIPELINE_STAGE: normalize
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_started
+    volumes:
+      - upload_quarantine:/app/quarantine
+
+  upload_dispatcher:
+    build:
+      context: ./worker
+      dockerfile: Dockerfile
+    command: ["python", "-m", "app.upload_pipeline_main"]
+    environment:
+      APP_ENV: ${APP_ENV:-development}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      PROJECT_NAME: ${PROJECT_NAME:-NextBoo}
+      POSTGRES_HOST: ${POSTGRES_HOST:-postgres}
+      POSTGRES_PORT: ${POSTGRES_PORT:-5432}
+      POSTGRES_DB: ${POSTGRES_DB:-nextboo}
+      POSTGRES_USER: ${POSTGRES_USER:-nextboo}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-nextboo}
+      REDIS_HOST: ${REDIS_HOST:-redis}
+      REDIS_PORT: ${REDIS_PORT:-6379}
+      QUARANTINE_PATH: ${QUARANTINE_PATH:-/app/quarantine}
+      QUEUE_PATH: ${QUEUE_PATH:-/app/queue}
+      PROCESSING_PATH: ${PROCESSING_PATH:-/app/processing}
+      PROCESSING_FAILED_PATH: ${PROCESSING_FAILED_PATH:-/app/processing_failed}
+      CONTENT_PATH: ${CONTENT_PATH:-/app/content}
+      THUMB_PATH: ${THUMB_PATH:-/app/content_thumbs}
+      IMPORT_PATH: ${IMPORT_PATH:-/app/imports}
+      MODEL_PATH: ${MODEL_PATH:-/models}
+      UPLOAD_PIPELINE_STAGE: dispatch
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_started
+    volumes:
+      - upload_quarantine:/app/quarantine
+      - ${GALLERY_ROOT:-./gallery}/queue:/app/queue
 
   worker_autoscaler:
     build:
@@ -143,3 +326,6 @@ services:
   redis:
     image: redis:7-alpine
     command: ["redis-server", "--save", "60", "1", "--loglevel", "warning"]
+
+volumes:
+  upload_quarantine:

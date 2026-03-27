@@ -103,6 +103,7 @@ export function AdminShell({ children, title, description }: AdminShellProps) {
             <div className="admin-menu-list">
               <AdminMenuLink href="/admin/jobs" label="Jobs" />
               <AdminMenuLink href="/admin/imports" label="Imports" />
+              <AdminMenuLink href="/admin/upload-pipeline" label="Upload Pipeline" />
               <AdminMenuLink href="/admin/board-imports" label="Board Importer" />
               <AdminMenuLink href="/admin/worker-scaling" label="Worker Scaling" />
               <AdminMenuLink href="/admin/tagger-settings" label="Tagger Maintenance" />

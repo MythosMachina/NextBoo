@@ -8,6 +8,7 @@ from app.models.import_job import ImportBatch, Job
 from app.models.moderation import ImageModeration, ImageReport, NearDuplicateReview
 from app.models.tag import DangerTag, ImageDangerHit, Tag, TagAlias, TagMerge, TagRatingRule
 from app.models.upload_request import UploadPermissionRequest
+from app.models.upload_pipeline import UploadPipelineBatch, UploadPipelineItem
 from app.models.user import BannedEmail, User
 from app.models.vote import ImageVote, UserVoteThrottle
 from app.models.worker_audit import WorkerAuditLog
@@ -36,6 +37,8 @@ __all__ = [
     "DangerTag",
     "ImageDangerHit",
     "UploadPermissionRequest",
+    "UploadPipelineBatch",
+    "UploadPipelineItem",
     "BannedEmail",
     "User",
     "ImageVote",

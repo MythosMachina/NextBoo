@@ -79,6 +79,49 @@ class AutoscalerSettingsResponse(BaseModel):
     meta: dict[str, str] = {}
 
 
+class UploadPipelineBalancerStageRead(BaseModel):
+    stage: str
+    label: str
+    min_workers: int
+    max_workers: int
+    jobs_per_worker: int
+    current_workers: int = 0
+    recommended_workers: int = 1
+    queue_depth: int = 0
+    oldest_queued_seconds: int = 0
+    score: float = 0
+    active_workers: list[str] = []
+
+
+class UploadPipelineBalancerStageUpdate(BaseModel):
+    stage: str
+    min_workers: int
+    max_workers: int
+    jobs_per_worker: int
+
+
+class UploadPipelineBalancerSettingsRead(BaseModel):
+    upload_pipeline_balancer_enabled: bool
+    upload_pipeline_balancer_poll_seconds: int
+    upload_pipeline_balancer_flexible_slots: int
+    stages: list[UploadPipelineBalancerStageRead] = []
+    last_rebalance_at: str | None = None
+    last_rebalance_summary: str | None = None
+    last_error: str | None = None
+
+
+class UploadPipelineBalancerSettingsUpdate(BaseModel):
+    upload_pipeline_balancer_enabled: bool
+    upload_pipeline_balancer_poll_seconds: int
+    upload_pipeline_balancer_flexible_slots: int
+    stages: list[UploadPipelineBalancerStageUpdate]
+
+
+class UploadPipelineBalancerSettingsResponse(BaseModel):
+    data: UploadPipelineBalancerSettingsRead
+    meta: dict[str, str] = {}
+
+
 class TaggerSettingsRead(BaseModel):
     provider: str
     retag_all_running: bool = False

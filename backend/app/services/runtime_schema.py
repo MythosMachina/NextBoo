@@ -409,3 +409,84 @@ def ensure_runtime_backup_export_schema(engine: Engine) -> None:
     for statement in statements:
         with engine.begin() as connection:
             connection.execute(text(statement))
+
+
+def ensure_runtime_upload_pipeline_schema(engine: Engine) -> None:
+    inspector = inspect(engine)
+    tables = set(inspector.get_table_names())
+    statements: list[str] = []
+
+    if "upload_pipeline_batches" not in tables:
+        statements.extend(
+            [
+                """
+                CREATE TABLE upload_pipeline_batches (
+                    id SERIAL PRIMARY KEY,
+                    submitted_by_user_id INTEGER NULL REFERENCES users(id) ON DELETE SET NULL,
+                    linked_import_id INTEGER NULL REFERENCES imports(id) ON DELETE SET NULL,
+                    source_name VARCHAR(255) NOT NULL DEFAULT 'web',
+                    status VARCHAR(32) NOT NULL DEFAULT 'received',
+                    total_items INTEGER NOT NULL DEFAULT 0,
+                    completed_items INTEGER NOT NULL DEFAULT 0,
+                    duplicate_items INTEGER NOT NULL DEFAULT 0,
+                    rejected_items INTEGER NOT NULL DEFAULT 0,
+                    failed_items INTEGER NOT NULL DEFAULT 0,
+                    finished_at TIMESTAMPTZ NULL,
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                )
+                """,
+                "CREATE INDEX IF NOT EXISTS ix_upload_pipeline_batches_status ON upload_pipeline_batches (status)",
+                "CREATE INDEX IF NOT EXISTS ix_upload_pipeline_batches_submitted_by_user_id ON upload_pipeline_batches (submitted_by_user_id)",
+                "CREATE INDEX IF NOT EXISTS ix_upload_pipeline_batches_linked_import_id ON upload_pipeline_batches (linked_import_id)",
+            ]
+        )
+    else:
+        statements.extend(
+            [
+                "ALTER TABLE upload_pipeline_batches ADD COLUMN IF NOT EXISTS linked_import_id INTEGER NULL REFERENCES imports(id) ON DELETE SET NULL",
+                "CREATE INDEX IF NOT EXISTS ix_upload_pipeline_batches_linked_import_id ON upload_pipeline_batches (linked_import_id)",
+            ]
+        )
+
+    if "upload_pipeline_items" not in tables:
+        statements.extend(
+            [
+                """
+                CREATE TABLE upload_pipeline_items (
+                    id SERIAL PRIMARY KEY,
+                    batch_id INTEGER NOT NULL REFERENCES upload_pipeline_batches(id) ON DELETE CASCADE,
+                    submitted_by_user_id INTEGER NULL REFERENCES users(id) ON DELETE SET NULL,
+                    client_key VARCHAR(255) NULL,
+                    original_filename VARCHAR(512) NOT NULL,
+                    detected_mime_type VARCHAR(128) NULL,
+                    media_family VARCHAR(32) NULL,
+                    quarantine_path VARCHAR(1024) NULL,
+                    normalized_path VARCHAR(1024) NULL,
+                    checksum_sha256 VARCHAR(64) NULL,
+                    source_size INTEGER NULL,
+                    stage VARCHAR(32) NOT NULL DEFAULT 'ingress',
+                    status VARCHAR(32) NOT NULL DEFAULT 'received',
+                    detail_message TEXT NULL,
+                    linked_import_id INTEGER NULL REFERENCES imports(id) ON DELETE SET NULL,
+                    linked_job_id INTEGER NULL REFERENCES jobs(id) ON DELETE SET NULL,
+                    linked_image_id VARCHAR(36) NULL REFERENCES images(id) ON DELETE SET NULL,
+                    last_stage_change_at TIMESTAMPTZ NULL,
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                )
+                """,
+                "CREATE INDEX IF NOT EXISTS ix_upload_pipeline_items_batch_id ON upload_pipeline_items (batch_id)",
+                "CREATE INDEX IF NOT EXISTS ix_upload_pipeline_items_submitted_by_user_id ON upload_pipeline_items (submitted_by_user_id)",
+                "CREATE INDEX IF NOT EXISTS ix_upload_pipeline_items_checksum_sha256 ON upload_pipeline_items (checksum_sha256)",
+                "CREATE INDEX IF NOT EXISTS ix_upload_pipeline_items_stage ON upload_pipeline_items (stage)",
+                "CREATE INDEX IF NOT EXISTS ix_upload_pipeline_items_status ON upload_pipeline_items (status)",
+                "CREATE INDEX IF NOT EXISTS ix_upload_pipeline_items_linked_import_id ON upload_pipeline_items (linked_import_id)",
+                "CREATE INDEX IF NOT EXISTS ix_upload_pipeline_items_linked_job_id ON upload_pipeline_items (linked_job_id)",
+                "CREATE INDEX IF NOT EXISTS ix_upload_pipeline_items_linked_image_id ON upload_pipeline_items (linked_image_id)",
+            ]
+        )
+
+    for statement in statements:
+        with engine.begin() as connection:
+            connection.execute(text(statement))

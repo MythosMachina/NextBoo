@@ -9,6 +9,7 @@ class StorageService:
     def __init__(self) -> None:
         settings = get_settings()
         self.queue_path = Path(settings.queue_path)
+        self.quarantine_path = Path(settings.quarantine_path)
         self.processing_path = Path(settings.processing_path)
         self.processing_failed_path = Path(settings.processing_failed_path)
         self.content_path = Path(settings.content_path)
@@ -17,6 +18,7 @@ class StorageService:
 
     def ensure_dirs(self) -> None:
         for path in (
+            self.quarantine_path,
             self.queue_path,
             self.processing_path,
             self.processing_failed_path,
@@ -25,6 +27,9 @@ class StorageService:
             self.model_path,
         ):
             path.mkdir(parents=True, exist_ok=True)
+
+    def quarantine_file(self, filename: str) -> Path:
+        return self.quarantine_path / filename
 
     @staticmethod
     def derive_uuid_short(full_uuid: str) -> str:

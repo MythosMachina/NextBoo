@@ -99,6 +99,38 @@ class UploadRequestStatus(StrEnum):
     REJECTED = "rejected"
 
 
+class UploadPipelineBatchStatus(StrEnum):
+    RECEIVED = "received"
+    RUNNING = "running"
+    PAUSED = "paused"
+    FAILED = "failed"
+    COMPLETED = "completed"
+    CANCELLED = "cancelled"
+
+
+class UploadPipelineStage(StrEnum):
+    INGRESS = "ingress"
+    QUARANTINE = "quarantine"
+    SCANNING = "scanning"
+    DEDUPE = "dedupe"
+    NORMALIZE = "normalize"
+    DISPATCH = "dispatch"
+    FINAL_INGEST = "final_ingest"
+
+
+class UploadPipelineItemStatus(StrEnum):
+    RECEIVED = "received"
+    QUEUED = "queued"
+    RUNNING = "running"
+    DUPLICATE = "duplicate"
+    REJECTED = "rejected"
+    READY = "ready"
+    DISPATCHED = "dispatched"
+    PROCESSING = "processing"
+    COMPLETED = "completed"
+    FAILED = "failed"
+
+
 class VariantType(StrEnum):
     ORIGINAL = "original"
     THUMB = "thumb"

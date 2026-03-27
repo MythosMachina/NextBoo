@@ -4,7 +4,8 @@ from pydantic import BaseModel
 class UploadAcceptedItem(BaseModel):
     client_key: str
     filename: str
-    job_id: int
+    upload_item_id: int
+    job_id: int | None = None
 
 
 class UploadRejectedItem(BaseModel):
@@ -20,6 +21,7 @@ class UploadResponse(BaseModel):
 
 
 class UploadJobStatusItem(BaseModel):
+    upload_item_id: int | None = None
     job_id: int
     status: str
     image_id: str | None

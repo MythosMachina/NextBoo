@@ -1,4 +1,4 @@
-from app.api.v1.routes import app_settings, auth, board_imports, health, images, invites, jobs, moderation, search, strikes, tags, upload_requests, uploads, users
+from app.api.v1.routes import app_settings, auth, board_imports, health, images, invites, jobs, moderation, search, strikes, tags, upload_pipeline, upload_requests, uploads, users
 from fastapi import APIRouter
 
 
@@ -17,3 +17,4 @@ api_router.include_router(search.router, tags=["search"])
 api_router.include_router(jobs.router, tags=["jobs"])
 api_router.include_router(upload_requests.router, tags=["upload-requests"])
 api_router.include_router(uploads.router, tags=["uploads"])
+api_router.include_router(upload_pipeline.router, tags=["upload-pipeline"])

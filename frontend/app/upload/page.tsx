@@ -6,7 +6,8 @@ import { authFetch, useAuthState } from "../components/auth";
 type AcceptedUploadItem = {
   client_key: string;
   filename: string;
-  job_id: number;
+  upload_item_id: number;
+  job_id: number | null;
 };
 
 type RejectedUploadItem = {
@@ -19,6 +20,7 @@ type UploadEntry = {
   clientKey: string;
   filename: string;
   filesize: number;
+  uploadItemId: number | null;
   jobId: number | null;
   status: "selected" | "uploading" | "queued" | "processing" | "ready" | "failed";
   detail: string;
@@ -63,7 +65,7 @@ export default function UploadPage() {
   }
 
   useEffect(() => {
-    const trackedIds = entries.map((entry) => entry.jobId).filter(Boolean) as number[];
+    const trackedIds = entries.map((entry) => entry.uploadItemId).filter(Boolean) as number[];
     if (!trackedIds.length) {
       return;
     }
@@ -78,30 +80,58 @@ export default function UploadPage() {
         return;
       }
       const payload = await response.json();
-      const statusMap = new Map<number, { status: string; last_error: string | null }>();
-      payload.data.forEach((item: { job_id: number; status: string; last_error: string | null }) => {
-        statusMap.set(item.job_id, { status: item.status, last_error: item.last_error });
+      const statusMap = new Map<number, { status: string; last_error: string | null; jobId: number }>();
+      payload.data.forEach((item: { upload_item_id: number; job_id: number; status: string; last_error: string | null }) => {
+        statusMap.set(item.upload_item_id, { status: item.status, last_error: item.last_error, jobId: item.job_id });
       });
 
       setEntries((current) =>
         current.map((entry) => {
-          if (!entry.jobId) {
+          if (!entry.uploadItemId) {
             return entry;
           }
-          const update = statusMap.get(entry.jobId);
+          const update = statusMap.get(entry.uploadItemId);
           if (!update) {
             return entry;
           }
-          if (update.status === "done") {
-            return { ...entry, status: "ready", detail: "Processed successfully" };
+          if (update.status === "done" || update.status === "completed" || update.status === "duplicate") {
+            return {
+              ...entry,
+              jobId: update.jobId || entry.jobId,
+              status: "ready",
+              detail: update.status === "duplicate" ? "Matched duplicate, no new image created" : "Processed successfully"
+            };
           }
-          if (update.status === "failed") {
-            return { ...entry, status: "failed", detail: update.last_error ?? "Processing failed" };
+          if (update.status === "failed" || update.status === "rejected") {
+            return {
+              ...entry,
+              jobId: update.jobId || entry.jobId,
+              status: "failed",
+              detail: update.last_error ?? "Processing failed"
+            };
           }
-          if (update.status === "queued") {
-            return { ...entry, status: "queued", detail: "Waiting for worker" };
+          if (update.status === "queued" || update.status === "ready") {
+            return {
+              ...entry,
+              jobId: update.jobId || entry.jobId,
+              status: "queued",
+              detail: "Waiting in upload pipeline"
+            };
           }
-          return { ...entry, status: "processing", detail: "Processing image" };
+          if (update.status === "dispatched") {
+            return {
+              ...entry,
+              jobId: update.jobId || entry.jobId,
+              status: "processing",
+              detail: "Queued for worker processing"
+            };
+          }
+          return {
+            ...entry,
+            jobId: update.jobId || entry.jobId,
+            status: "processing",
+            detail: "Processing image"
+          };
         })
       );
     }, 2500);
@@ -132,9 +162,10 @@ export default function UploadPage() {
     const selectedEntries = allFiles.map((file, index) => ({
       clientKey: buildClientKey(file, index),
       filename: file.name,
-      filesize: file.size,
-      jobId: null,
-      status: "uploading" as const,
+                    filesize: file.size,
+                    uploadItemId: null,
+                    jobId: null,
+                    status: "uploading" as const,
       detail: "Uploading to server"
     }));
     setEntries(selectedEntries);
@@ -169,9 +200,10 @@ export default function UploadPage() {
             if (accepted) {
               return {
                 ...entry,
+                uploadItemId: accepted.upload_item_id,
                 jobId: accepted.job_id,
                 status: "queued",
-                detail: "Queued for processing"
+                detail: "Accepted into quarantined upload queue"
               };
             }
             const rejected = rejectedMap.get(entry.clientKey);
@@ -193,11 +225,12 @@ export default function UploadPage() {
 
       setUploadProgress(100);
     } catch (submitError) {
-      setError(submitError instanceof Error ? submitError.message : "Upload failed.");
+      const message = submitError instanceof Error ? submitError.message : "Upload failed.";
+      setError(message);
       setEntries((current) =>
         current.map((entry) =>
           entry.status === "uploading"
-            ? { ...entry, status: "failed", detail: "Upload failed" }
+            ? { ...entry, status: "failed", detail: message }
             : entry
         )
       );
@@ -232,6 +265,7 @@ export default function UploadPage() {
                     clientKey: buildClientKey(file, index),
                     filename: file.name,
                     filesize: file.size,
+                    uploadItemId: null,
                     jobId: null,
                     status: "selected",
                     detail: "Ready to upload"
@@ -312,10 +346,43 @@ async function uploadChunk(
   });
 
   if (!response.ok) {
-    throw new Error(`Upload failed (${response.status}).`);
+    throw new Error(await buildUploadErrorMessage(response));
   }
 
   return (await response.json()) as { data: AcceptedUploadItem[]; rejected: RejectedUploadItem[] };
+}
+
+async function buildUploadErrorMessage(response: Response): Promise<string> {
+  let detail = "";
+  const retryAfter = response.headers.get("Retry-After");
+
+  try {
+    const payload = (await response.clone().json()) as { detail?: string };
+    if (typeof payload.detail === "string") {
+      detail = payload.detail.trim();
+    }
+  } catch {
+    detail = "";
+  }
+
+  if (response.status === 429) {
+    if (retryAfter && detail) {
+      return `Upload rate limit reached. ${detail}`;
+    }
+    if (retryAfter) {
+      return `Upload rate limit reached. Wait ${retryAfter} seconds before the next batch.`;
+    }
+    if (detail) {
+      return `Upload rate limit reached. ${detail}`;
+    }
+    return "Upload rate limit reached. Wait a bit before the next batch.";
+  }
+
+  if (detail) {
+    return detail;
+  }
+
+  return `Upload failed (${response.status}).`;
 }
 
 function buildClientKey(file: File, index = 0): string {

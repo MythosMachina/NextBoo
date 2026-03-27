@@ -20,6 +20,9 @@ from app.schemas.app_settings import (
     SidebarSettingsUpdate,
     TaggerSettingsRead,
     TaggerSettingsResponse,
+    UploadPipelineBalancerSettingsRead,
+    UploadPipelineBalancerSettingsResponse,
+    UploadPipelineBalancerSettingsUpdate,
     TermsOfServiceRead,
     TermsOfServiceResponse,
     TermsOfServiceUpdate,
@@ -32,6 +35,7 @@ from app.services.app_settings import (
     get_rate_limit_settings,
     get_tagger_provider,
     get_terms_of_service,
+    get_upload_pipeline_balancer_settings,
     get_sidebar_limits,
     maintenance_pending_key,
     maintenance_queue_name_for_provider,
@@ -41,6 +45,7 @@ from app.services.app_settings import (
     update_rate_limit_settings,
     update_sidebar_limits,
     update_terms_of_service,
+    update_upload_pipeline_balancer_settings,
 )
 from app.services.rate_limits import enforce_rate_limit
 from fastapi import APIRouter, Depends, HTTPException, Request, status
@@ -112,6 +117,55 @@ def build_autoscaler_settings_response(db: DbSession, redis: RedisClient) -> Aut
     )
 
 
+def build_upload_pipeline_balancer_settings_response(db: DbSession, redis: RedisClient) -> UploadPipelineBalancerSettingsResponse:
+    settings = get_upload_pipeline_balancer_settings(db)
+    status = redis.hgetall("nextboo:upload-balancer:status")
+    active_workers_by_stage = {
+        "scanning": sorted(key.removeprefix("nextboo:upload-stage:scanning:") for key in redis.keys("nextboo:upload-stage:scanning:*")),
+        "dedupe": sorted(key.removeprefix("nextboo:upload-stage:dedupe:") for key in redis.keys("nextboo:upload-stage:dedupe:*")),
+        "normalize": sorted(key.removeprefix("nextboo:upload-stage:normalize:") for key in redis.keys("nextboo:upload-stage:normalize:*")),
+        "dispatch": sorted(key.removeprefix("nextboo:upload-stage:dispatch:") for key in redis.keys("nextboo:upload-stage:dispatch:*")),
+        "ingest_image": sorted(key.removeprefix("nextboo:workers:image:active:") for key in redis.keys("nextboo:workers:image:active:*")),
+        "ingest_video": sorted(key.removeprefix("nextboo:workers:video:active:") for key in redis.keys("nextboo:workers:video:active:*")),
+    }
+    stage_rows = []
+    for stage in settings["stages"]:
+        stage_key = str(stage["stage"])
+        recommended = int(status.get(f"{stage_key}:recommended_workers") or stage["min_workers"])
+        queue_depth = int(status.get(f"{stage_key}:queue_depth") or 0)
+        oldest_seconds = int(status.get(f"{stage_key}:oldest_queued_seconds") or 0)
+        current_workers = int(status.get(f"{stage_key}:current_workers") or len(active_workers_by_stage.get(stage_key, [])))
+        visible_active_workers = list(active_workers_by_stage.get(stage_key, []))[: max(current_workers, 0)]
+        try:
+            score = float(status.get(f"{stage_key}:score") or 0)
+        except ValueError:
+            score = 0
+        stage_rows.append(
+            {
+                **stage,
+                "current_workers": current_workers,
+                "recommended_workers": recommended,
+                "queue_depth": queue_depth,
+                "oldest_queued_seconds": oldest_seconds,
+                "score": score,
+                "active_workers": visible_active_workers,
+            }
+        )
+
+    return UploadPipelineBalancerSettingsResponse(
+        data=UploadPipelineBalancerSettingsRead(
+            upload_pipeline_balancer_enabled=bool(settings["upload_pipeline_balancer_enabled"]),
+            upload_pipeline_balancer_poll_seconds=int(settings["upload_pipeline_balancer_poll_seconds"]),
+            upload_pipeline_balancer_flexible_slots=int(settings["upload_pipeline_balancer_flexible_slots"]),
+            stages=stage_rows,
+            last_rebalance_at=status.get("last_rebalance_at") or None,
+            last_rebalance_summary=status.get("last_rebalance_summary") or None,
+            last_error=status.get("last_error") or None,
+        ),
+        meta={},
+    )
+
+
 @router.get("/sidebar", response_model=SidebarSettingsResponse)
 def get_sidebar_settings(
     db: DbSession,
@@ -153,6 +207,15 @@ def get_autoscaler(
     return build_autoscaler_settings_response(db, redis)
 
 
+@router.get("/upload-pipeline-balancer", response_model=UploadPipelineBalancerSettingsResponse)
+def get_upload_pipeline_balancer(
+    db: DbSession,
+    redis: RedisClient,
+    _: Annotated[User, Depends(require_roles(UserRole.ADMIN))],
+) -> UploadPipelineBalancerSettingsResponse:
+    return build_upload_pipeline_balancer_settings_response(db, redis)
+
+
 @router.patch("/rate-limits", response_model=RateLimitSettingsResponse)
 def patch_rate_limits(
     payload: RateLimitSettingsUpdate,
@@ -187,6 +250,34 @@ def patch_autoscaler(
     }
     update_autoscaler_settings(db, sanitized)
     return build_autoscaler_settings_response(db, redis)
+
+
+@router.patch("/upload-pipeline-balancer", response_model=UploadPipelineBalancerSettingsResponse)
+def patch_upload_pipeline_balancer(
+    payload: UploadPipelineBalancerSettingsUpdate,
+    db: DbSession,
+    redis: RedisClient,
+    request: Request,
+    current_user: Annotated[User, Depends(require_roles(UserRole.ADMIN))],
+) -> UploadPipelineBalancerSettingsResponse:
+    enforce_rate_limit(db, redis, request, "admin_write", current_user=current_user)
+    sanitized = {
+        "upload_pipeline_balancer_enabled": True,
+        "upload_pipeline_balancer_poll_seconds": max(payload.upload_pipeline_balancer_poll_seconds, 5),
+        "upload_pipeline_balancer_flexible_slots": 0,
+        "stages": [
+            {
+                "stage": stage.stage,
+                "min_workers": max(stage.min_workers, 1),
+                "max_workers": max(stage.max_workers, 1),
+                "jobs_per_worker": max(stage.jobs_per_worker, 1),
+            }
+            for stage in payload.stages
+        ],
+    }
+    update_upload_pipeline_balancer_settings(db, sanitized)
+    redis.set("nextboo:upload-balancer:force", "1", ex=60)
+    return build_upload_pipeline_balancer_settings_response(db, redis)
 
 
 @router.get("/tagger", response_model=TaggerSettingsResponse)

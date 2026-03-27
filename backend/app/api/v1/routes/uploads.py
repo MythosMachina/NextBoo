@@ -6,9 +6,9 @@ from pathlib import Path
 from typing import Annotated
 
 from app.api.deps import DbSession, RedisClient
-from app.core.constants import ImportSourceType, ImportStatus, JobStatus, JobType, UserRole
-from app.models.image import Image
+from app.core.constants import ImportSourceType, JobStatus, UploadPipelineBatchStatus, UploadPipelineItemStatus, UploadPipelineStage, UserRole
 from app.models.import_job import ImportBatch, Job
+from app.models.upload_pipeline import UploadPipelineBatch, UploadPipelineItem
 from app.models.user import User
 from app.schemas.upload import (
     ImportFolderRequest,
@@ -21,17 +21,10 @@ from app.schemas.upload import (
     UploadResponse,
     UploadStatusResponse,
 )
-from app.services.app_settings import ingest_queue_name_for_provider
 from app.services.permissions import require_upload_access
 from app.services.rate_limits import enforce_rate_limit
 from app.services.storage import StorageService
 from fastapi import APIRouter, Depends, File, Form, Query, Request, UploadFile, status
-
-try:
-    from app.services.app_settings import get_tagger_provider as resolve_tagger_provider
-except ImportError:
-    from app.services.app_settings import get_active_tagger_provider as resolve_tagger_provider
-
 
 router = APIRouter(prefix="/uploads")
 
@@ -51,6 +44,7 @@ MAX_FILES_PER_REQUEST = 100
 OUTCOME_STREAM_KEY = "nextboo:jobs:outcomes"
 OUTCOME_STREAM_LIMIT = 500
 ZIP_STAGING_PREFIX = "zip_"
+UPLOAD_SCAN_QUEUE = "upload:stage:scan"
 
 
 def record_upload_outcome(
@@ -79,19 +73,17 @@ def detect_content_type(filename: str) -> str:
     return mimetypes.guess_type(filename)[0] or "application/octet-stream"
 
 
-def create_import_batch(
+def create_upload_pipeline_batch(
     db: DbSession,
     current_user: User,
     *,
-    source_type: ImportSourceType,
     source_name: str,
-) -> ImportBatch:
-    import_batch = ImportBatch(
-        source_type=source_type,
+) -> UploadPipelineBatch:
+    import_batch = UploadPipelineBatch(
         source_name=source_name,
         submitted_by_user_id=current_user.id,
-        total_files=0,
-        status=ImportStatus.PENDING,
+        total_items=0,
+        status=UploadPipelineBatchStatus.RECEIVED.value,
     )
     db.add(import_batch)
     db.commit()
@@ -110,100 +102,50 @@ def finalize_staged_uploads(
     rejected: list[UploadRejectedItem] | None = None,
 ) -> UploadResponse:
     accepted: list[UploadAcceptedItem] = []
-    import_batch: ImportBatch | None = None
+    pipeline_batch: UploadPipelineBatch | None = None
     rejections = list(rejected or [])
-    tagger_provider = resolve_tagger_provider(db)
-    ingest_queue_name = ingest_queue_name_for_provider(tagger_provider)
-
-    if staged_uploads:
-        incoming_hashes = [str(item["checksum_sha256"]) for item in staged_uploads]
-        existing_rows = (
-            db.query(Image.checksum_sha256, Image.id)
-            .filter(Image.checksum_sha256.in_(incoming_hashes))
-            .all()
-        )
-        existing_hash_map = {checksum: image_id for checksum, image_id in existing_rows}
-        seen_batch_hashes: set[str] = set()
-        unique_uploads: list[dict[str, str | int]] = []
-
-        for item in staged_uploads:
-            checksum_sha256 = str(item["checksum_sha256"])
-            queue_path = Path(str(item["queue_path"]))
-            duplicate_image_id = existing_hash_map.get(checksum_sha256)
-            if duplicate_image_id:
-                queue_path.unlink(missing_ok=True)
-                rejections.append(
-                    UploadRejectedItem(
-                        client_key=str(item["client_key"]),
-                        filename=str(item["filename"]),
-                        error="Duplicate file already exists in the gallery.",
-                    )
-                )
-                record_upload_outcome(
-                    redis_client,
-                    outcome="duplicate",
-                    message=f"Duplicate upload matched existing image {duplicate_image_id}",
-                    image_id=str(duplicate_image_id),
-                )
-                continue
-
-            if checksum_sha256 in seen_batch_hashes:
-                queue_path.unlink(missing_ok=True)
-                rejections.append(
-                    UploadRejectedItem(
-                        client_key=str(item["client_key"]),
-                        filename=str(item["filename"]),
-                        error="Duplicate file inside the current import batch.",
-                    )
-                )
-                record_upload_outcome(
-                    redis_client,
-                    outcome="duplicate",
-                    message="Duplicate upload matched another file in the same import batch.",
-                )
-                continue
-
-            seen_batch_hashes.add(checksum_sha256)
-            unique_uploads.append(item)
-
-        staged_uploads = unique_uploads
 
     for item in staged_uploads:
-        if import_batch is None:
-            import_batch = create_import_batch(
+        if pipeline_batch is None:
+            pipeline_batch = create_upload_pipeline_batch(
                 db,
                 current_user,
-                source_type=source_type,
                 source_name=source_name,
             )
 
-        job = Job(
-            job_type=JobType.INGEST,
-            queue_path=str(item["queue_path"]),
-            status=JobStatus.QUEUED,
-            retry_count=0,
-            max_retries=3,
-            import_batch_id=import_batch.id,
+        pipeline_item = UploadPipelineItem(
+            batch_id=pipeline_batch.id,
+            submitted_by_user_id=current_user.id,
+            client_key=str(item["client_key"]),
+            original_filename=str(item["filename"]),
+            detected_mime_type=str(item["mime_type"]),
+            quarantine_path=str(item["quarantine_path"]),
+            checksum_sha256=str(item["checksum_sha256"]),
+            source_size=int(item["file_size"]),
+            stage=UploadPipelineStage.QUARANTINE.value,
+            status=UploadPipelineItemStatus.QUEUED.value,
+            detail_message="Queued for quarantine scan.",
         )
-        db.add(job)
+        db.add(pipeline_item)
         db.commit()
-        db.refresh(job)
-        redis_client.rpush(ingest_queue_name, str(job.id))
+        db.refresh(pipeline_item)
+        redis_client.rpush(UPLOAD_SCAN_QUEUE, str(pipeline_item.id))
         accepted.append(
             UploadAcceptedItem(
                 client_key=str(item["client_key"]),
                 filename=str(item["filename"]),
-                job_id=job.id,
+                upload_item_id=pipeline_item.id,
+                job_id=None,
             )
         )
 
-    if import_batch is not None:
-        import_batch.total_files = len(accepted)
-        import_batch.failed_files = len(rejections)
-        import_batch.status = ImportStatus.RUNNING if accepted else ImportStatus.FAILED
+    if pipeline_batch is not None:
+        pipeline_batch.total_items = len(accepted) + len(rejections)
+        pipeline_batch.rejected_items = len(rejections)
+        pipeline_batch.status = UploadPipelineBatchStatus.RUNNING.value if accepted else UploadPipelineBatchStatus.FAILED.value
         if not accepted:
-            import_batch.finished_at = datetime.now(timezone.utc)
-        db.add(import_batch)
+            pipeline_batch.finished_at = datetime.now(timezone.utc)
+        db.add(pipeline_batch)
         db.commit()
 
     return UploadResponse(
@@ -212,7 +154,8 @@ def finalize_staged_uploads(
         meta={
             "count": len(accepted),
             "rejected_count": len(rejections),
-            "import_id": import_batch.id if import_batch is not None else "",
+            "import_id": "",
+            "pipeline_batch_id": pipeline_batch.id if pipeline_batch is not None else "",
             "source_type": source_type.value,
         },
     )
@@ -257,14 +200,14 @@ def upload_files(
             )
             continue
 
-        queue_path, checksum_sha256 = storage.write_upload_to_queue(upload)
-        file_size = Path(queue_path).stat().st_size
+        quarantine_path, checksum_sha256 = storage.write_upload_to_quarantine(upload)
+        file_size = Path(quarantine_path).stat().st_size
         if file_size > MAX_FILE_SIZE:
-            Path(queue_path).unlink(missing_ok=True)
+            Path(quarantine_path).unlink(missing_ok=True)
             rejected.append(
                 UploadRejectedItem(
                     client_key=client_key,
-                    filename=upload.filename or Path(queue_path).name,
+                    filename=upload.filename or Path(quarantine_path).name,
                     error="File exceeds maximum size.",
                 )
             )
@@ -273,10 +216,11 @@ def upload_files(
         staged_uploads.append(
             {
                 "client_key": client_key,
-                "filename": upload.filename or Path(queue_path).name,
-                "queue_path": queue_path,
+                "filename": upload.filename or Path(quarantine_path).name,
+                "quarantine_path": quarantine_path,
                 "checksum_sha256": checksum_sha256,
                 "file_size": file_size,
+                "mime_type": upload.content_type or detect_content_type(upload.filename or "upload.bin"),
             }
         )
 
@@ -332,10 +276,10 @@ def import_from_folder(
     staged_uploads: list[dict[str, str | int]] = []
     rejected: list[UploadRejectedItem] = []
     for path in storage.iter_importable_files(source_folder)[:MAX_FILES_PER_REQUEST]:
-        queue_path, checksum_sha256 = storage.stage_local_file_to_queue(path)
-        file_size = Path(queue_path).stat().st_size
+        quarantine_path, checksum_sha256 = storage.stage_local_file_to_quarantine(path)
+        file_size = Path(quarantine_path).stat().st_size
         if file_size > MAX_FILE_SIZE:
-            Path(queue_path).unlink(missing_ok=True)
+            Path(quarantine_path).unlink(missing_ok=True)
             rejected.append(
                 UploadRejectedItem(
                     client_key=str(path.relative_to(source_folder)),
@@ -348,9 +292,10 @@ def import_from_folder(
             {
                 "client_key": str(path.relative_to(source_folder)),
                 "filename": path.name,
-                "queue_path": queue_path,
+                "quarantine_path": quarantine_path,
                 "checksum_sha256": checksum_sha256,
                 "file_size": file_size,
+                "mime_type": detect_content_type(path.name),
             }
         )
 
@@ -399,10 +344,10 @@ def import_from_zip(
         for path in extracted_files[:MAX_FILES_PER_REQUEST]:
             if detect_content_type(path.name) not in ALLOWED_MIME_TYPES:
                 continue
-            queue_path, checksum_sha256 = storage.stage_local_file_to_queue(path)
-            file_size = Path(queue_path).stat().st_size
+            quarantine_path, checksum_sha256 = storage.stage_local_file_to_quarantine(path)
+            file_size = Path(quarantine_path).stat().st_size
             if file_size > MAX_FILE_SIZE:
-                Path(queue_path).unlink(missing_ok=True)
+                Path(quarantine_path).unlink(missing_ok=True)
                 rejected.append(
                     UploadRejectedItem(
                         client_key=str(path.relative_to(staging_root)),
@@ -415,9 +360,10 @@ def import_from_zip(
                 {
                     "client_key": str(path.relative_to(staging_root)),
                     "filename": path.name,
-                    "queue_path": queue_path,
+                    "quarantine_path": quarantine_path,
                     "checksum_sha256": checksum_sha256,
                     "file_size": file_size,
+                    "mime_type": detect_content_type(path.name),
                 }
             )
 
@@ -444,24 +390,41 @@ def get_upload_status(
     if not requested_ids:
         return UploadStatusResponse(data=[], meta={"count": 0})
 
-    query = (
-        db.query(Job)
-        .join(ImportBatch, ImportBatch.id == Job.import_batch_id)
-        .filter(Job.id.in_(requested_ids))
-    )
+    item_query = db.query(UploadPipelineItem).filter(UploadPipelineItem.id.in_(requested_ids))
     if current_user.role == UserRole.UPLOADER:
-        query = query.filter(ImportBatch.submitted_by_user_id == current_user.id)
+        item_query = item_query.filter(UploadPipelineItem.submitted_by_user_id == current_user.id)
 
-    jobs = query.all()
+    items = item_query.all()
+    linked_job_ids = [item.linked_job_id for item in items if item.linked_job_id]
+    jobs_by_id: dict[int, Job] = {}
+    if linked_job_ids:
+        job_query = (
+            db.query(Job)
+            .join(ImportBatch, ImportBatch.id == Job.import_batch_id)
+            .filter(Job.id.in_(linked_job_ids))
+        )
+        if current_user.role == UserRole.UPLOADER:
+            job_query = job_query.filter(ImportBatch.submitted_by_user_id == current_user.id)
+        jobs_by_id = {job.id: job for job in job_query.all()}
+
     return UploadStatusResponse(
         data=[
             UploadJobStatusItem(
-                job_id=job.id,
-                status=job.status.value,
-                image_id=job.image_id,
-                last_error=job.last_error,
+                upload_item_id=item.id,
+                job_id=item.linked_job_id or 0,
+                status=(
+                    jobs_by_id[item.linked_job_id].status.value
+                    if item.linked_job_id in jobs_by_id
+                    else item.status
+                ),
+                image_id=item.linked_image_id or (jobs_by_id[item.linked_job_id].image_id if item.linked_job_id in jobs_by_id else None),
+                last_error=(
+                    jobs_by_id[item.linked_job_id].last_error
+                    if item.linked_job_id in jobs_by_id
+                    else item.detail_message
+                ),
             )
-            for job in jobs
+            for item in items
         ],
-        meta={"count": len(jobs)},
+        meta={"count": len(items)},
     )

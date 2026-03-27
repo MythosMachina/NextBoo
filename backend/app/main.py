@@ -26,6 +26,7 @@ from app.services.runtime_schema import (
     ensure_runtime_comment_schema,
     ensure_runtime_danger_tag_schema,
     ensure_runtime_near_duplicate_schema,
+    ensure_runtime_upload_pipeline_schema,
     ensure_runtime_invite_columns,
     ensure_runtime_rating_enums,
     ensure_runtime_user_columns,
@@ -95,6 +96,7 @@ def on_startup() -> None:
     ensure_runtime_comment_schema(engine)
     ensure_runtime_board_import_schema(engine)
     ensure_runtime_backup_export_schema(engine)
+    ensure_runtime_upload_pipeline_schema(engine)
     ensure_runtime_danger_tag_schema(engine)
     ensure_runtime_near_duplicate_schema(engine)
     ensure_runtime_vote_schema(engine)
