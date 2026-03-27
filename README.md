@@ -39,7 +39,7 @@ It is intended to function both as a media archive and as a foundation for AI-dr
 
 ## Core Features
 
-- automatic ingest for images, GIF, animated WebP, WebM, MP4, and MKV clips
+- staged ingest for images, GIF, animated WebP, WebM, MP4, and MKV clips
 - audio-preserving clip support for short videos
 - Camie-based auto tagging with namespace-aware tags
 - four-stage rating model:
@@ -55,7 +55,8 @@ It is intended to function both as a media archive and as a foundation for AI-dr
 - integrated board importer with queue-backed progress logs and per-board runs
 - invite-only access model with bootstrap and rescue admin invite scripts
 - dynamic Terms of Service page with admin editor and forced re-acceptance flow
-- worker scaling controls and autoscaler support
+- live upload control room with per-stage telemetry, acknowledgements, and stage allocation
+- worker scaling controls, upload-stage balancing, and autoscaler support
 - Docker-first deployment
 
 ## Current Media Model
@@ -67,6 +68,19 @@ NextBoo currently distinguishes between:
 - `video`
 
 The worker extracts thumbnails, derives metadata, and tags static and moving media through the same ingest pipeline. Video clips keep audio and expose runtime metadata such as duration, codecs, and audio presence.
+
+## Current Ingest Model
+
+NextBoo now uses a staged upload pipeline before final ingest:
+
+- `quarantine`
+- `scan`
+- `dedupe`
+- `normalize`
+- `dispatch`
+- `final ingest`
+
+This keeps raw uploads away from the main archive until they have passed early validation and duplicate checks. Each stage can be scaled independently, and the admin control room shows queue pressure, stage health, recommended worker counts, and failed-item acknowledgements in near realtime.
 
 ## Feature Areas
 
@@ -84,8 +98,12 @@ The worker extracts thumbnails, derives metadata, and tags static and moving med
 - web upload
 - ZIP import
 - server-side folder import
+- quarantined staging before final ingest
+- scan, dedupe, normalize, and dispatch stages before the main worker queue
 - exact duplicate detection before worker processing
 - post-ingest duplicate and moderation outcome visibility
+- live upload pipeline control room with stage health, queue depth, and acknowledgements
+- per-stage allocation controls for scaling upload bottlenecks
 - full retag and prune maintenance flow
 
 ### Social Layer
@@ -107,6 +125,7 @@ The worker extracts thumbnails, derives metadata, and tags static and moving med
 - upload access and invite management
 - user and strike administration
 - worker scaling controls
+- upload pipeline control room
 - board importer monitoring and cleanup actions
 - Terms of Service editor with live versioning
 
@@ -146,20 +165,92 @@ Default services in the main stack:
 
 - `frontend`: NextBoo web UI
 - `backend`: FastAPI API under `/api/v1`
-- `worker`: media ingest and retag processing
-- `worker_autoscaler`: optional worker scaling controller
+- `upload_scanner`: early validation and decode checks
+- `upload_dedupe`: exact duplicate filtering before final ingest
+- `upload_normalizer`: media normalization and preview preparation
+- `upload_dispatcher`: controlled handoff into final ingest queues
+- `worker`: image ingest and retag processing
+- `worker_video`: dedicated final-ingest path for video-heavy workloads
+- `worker_autoscaler`: stage-aware worker scaling controller
 - `postgres`: metadata database
 - `redis`: queue and runtime coordination
 
+### Ingest Flow
+
+1. uploads enter through the web UI or importer
+2. the backend registers upload batches and items in quarantine
+3. `upload_scanner` validates format, decodeability, and early limits
+4. `upload_dedupe` removes batch-internal and global exact duplicates
+5. `upload_normalizer` prepares clean media artifacts for downstream ingest
+6. `upload_dispatcher` feeds accepted items into the final ingest queues
+7. `worker` and `worker_video` perform tagging, media extraction, and archive writes
+8. the control room and stage balancer observe pressure, backlog age, health, and worker counts across every stage
+
+### Service Topology
+
 ```mermaid
-flowchart TD
-    A[User / Importer] --> B[Frontend / Next.js]
-    B --> C[Backend API / FastAPI]
-    C --> D[Redis Queue]
-    D --> E[Worker Pool]
-    E --> F[Camie Tagging + Media Processing]
-    F --> G[PostgreSQL + Storage]
+flowchart LR
+    U[User / Board Importer]
+    F[Frontend]
+    B[Backend API]
+    P[(PostgreSQL)]
+    R[(Redis)]
+    Q[Quarantine Batch Records]
+    S[upload_scanner]
+    D[upload_dedupe]
+    N[upload_normalizer]
+    X[upload_dispatcher]
+    WI[worker]
+    WV[worker_video]
+    C[Camie + Media Processing]
+    G[(Archive Storage)]
+    CR[Upload Control Room]
+    A[Stage Balancer / worker_autoscaler]
+
+    U --> F
+    U --> B
+    F --> B
+    B --> Q
+    B --> P
+    B --> R
+
+    Q --> S
+    S --> D
+    D --> N
+    N --> X
+    X --> WI
+    X --> WV
+    WI --> C
+    WV --> C
+    C --> P
+    C --> G
+
+    S --> R
+    D --> R
+    N --> R
+    X --> R
+    WI --> R
+    WV --> R
+
+    CR --> B
+    CR --> P
+    CR --> R
+    A --> R
+    A --> S
+    A --> D
+    A --> N
+    A --> X
+    A --> WI
+    A --> WV
 ```
+
+### Runtime Notes
+
+- raw uploads are staged before final ingest instead of going directly into the archive path
+- duplicate filtering happens before Camie or the main workers spend time on a file
+- image-heavy and video-heavy final ingest can scale independently
+- the upload control room is intended as an operator-facing live view, not just a passive status page
+- stage allocation settings let admins shape capacity per bottleneck instead of only scaling the final worker pool
 
 ## Repository Layout
 
@@ -167,7 +258,7 @@ flowchart TD
 backend/     FastAPI application, API routes, models, services
 frontend/    Next.js application
 worker/      ingest and tagging worker
-autoscaler/  worker autoscaler service
+autoscaler/  worker and upload-stage balancer service
 scripts/     operational scripts
 infra/       deployment-related assets
 gallery/     runtime storage root for local development
@@ -199,17 +290,6 @@ During invite registration, the user must accept the current Terms of Service be
 
 - frontend: `http://localhost:13000`
 - backend health: `http://localhost:18000/api/v1/health`
-
-## Screenshots
-
-Recommended screenshots for the repository front page:
-
-- gallery / home view
-- post detail view
-- admin board importer
-- worker scaling admin page
-
-Add them under a `docs/screenshots/` folder when ready and link them here.
 
 ## Admin Bootstrap and Recovery
 
@@ -253,6 +333,21 @@ Check your ground:
 - know the laws and platform rules that apply in your jurisdiction
 - review what your users upload and what your instance retains
 - do not assume automation alone is enough for compliance or safety
+
+## Scaling and Operations
+
+NextBoo now has two separate scaling layers:
+
+- `Worker Scaling`
+  - controls the classic final-ingest worker pool
+  - useful for steady-state image and video processing capacity
+- `Upload Pipeline Control Room`
+  - exposes the staged ingress flow live
+  - shows pressure, backlog age, active workers, failed counts, and final ingest pressure
+  - lets admins adjust per-stage `min workers`, `max workers`, and `jobs per worker`
+  - automatically rebalances stage capacity when load shifts between scan, dedupe, normalize, dispatch, and final ingest
+
+The control room is designed as an operator-facing view, not a passive status page. It is intended to make bottlenecks visible at a glance and to keep large bulk ingests from stalling the rest of the system.
 
 ## Storage Model
 
