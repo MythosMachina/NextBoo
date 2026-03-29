@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import json
+import mimetypes
 import tempfile
 import threading
 import time
@@ -16,6 +17,7 @@ from app.models.board_import import BoardImportEvent, BoardImportRun
 from app.models.image import Image, ImageTag
 from app.models.import_job import ImportBatch, Job
 from app.models.tag import Tag
+from app.models.upload_pipeline import UploadPipelineBatch, UploadPipelineItem
 from app.models.user import User
 from app.services.board_import.adapters import build_adapter
 from app.services.board_import.importer import download_remote_post, parse_csv_tags
@@ -237,85 +239,116 @@ def is_run_cancelled(db: Session, run_id: int) -> bool:
     return run.status == "cancelled"
 
 
-def wait_for_import_batch(
+def wait_for_upload_pipeline_batch(
     db: Session,
     run: BoardImportRun,
-    import_batch_id: int | None,
-    accepted_jobs: list[tuple[int, str, list[str]]],
+    pipeline_batch_id: int | None,
+    accepted_items: list[tuple[int, str, list[str]]],
 ) -> None:
-    if not accepted_jobs:
+    if not accepted_items or pipeline_batch_id is None:
         return
 
     deadline = time.time() + BOARD_IMPORT_JOB_TIMEOUT_SECONDS
-    accepted_job_map = {job_id: (remote_post_id, tag_list) for job_id, remote_post_id, tag_list in accepted_jobs}
-    seen_job_ids: set[int] = set()
+    accepted_item_map = {item_id: (remote_post_id, tag_list) for item_id, remote_post_id, tag_list in accepted_items}
+    seen_item_ids: set[int] = set()
+    announced_job_ids: set[int] = set()
     completed_posts = run.completed_posts
     duplicate_posts = run.duplicate_posts
     failed_posts = run.failed_posts
+    queued_posts = run.queued_posts
 
     while time.time() < deadline:
         if is_run_cancelled(db, run.id):
             return
-        outcome_rows = redis_entries(job_ids=set(accepted_job_map), import_batch_id=import_batch_id)
-        for payload in outcome_rows:
-            job_id = payload.get("job_id")
-            if not isinstance(job_id, int) or job_id not in accepted_job_map or job_id in seen_job_ids:
+
+        batch = db.get(UploadPipelineBatch, pipeline_batch_id)
+        if batch is not None and batch.linked_import_id is not None and run.source_import_batch_id != batch.linked_import_id:
+            update_run_counts(db, run, source_import_batch_id=batch.linked_import_id)
+            run = db.get(BoardImportRun, run.id) or run
+
+        items = (
+            db.query(UploadPipelineItem)
+            .filter(UploadPipelineItem.id.in_(accepted_item_map.keys()))
+            .all()
+        )
+        for item in items:
+            remote_post_id, tag_list = accepted_item_map[item.id]
+            if item.linked_job_id is not None and item.linked_job_id not in announced_job_ids:
+                announced_job_ids.add(item.linked_job_id)
+                if queued_posts < len(accepted_item_map):
+                    queued_posts += 1
+                append_event(
+                    db,
+                    run,
+                    level="info",
+                    event_type="queued",
+                    message=f"Queued remote post {remote_post_id} as worker job {item.linked_job_id}.",
+                    remote_post_id=remote_post_id,
+                    job_id=item.linked_job_id,
+                )
+            if item.id in seen_item_ids:
                 continue
-            remote_post_id, tag_list = accepted_job_map[job_id]
-            outcome = str(payload.get("outcome") or "")
-            image_id = str(payload.get("image_id")) if payload.get("image_id") else None
-            message = str(payload.get("message") or "")
-            if outcome == "accepted" and image_id:
-                add_manual_tags_to_image(db, image_id, tag_list)
+
+            if item.status == "completed" and item.linked_image_id:
+                add_manual_tags_to_image(db, item.linked_image_id, tag_list)
                 completed_posts += 1
                 append_event(
                     db,
                     run,
                     level="info",
                     event_type="completed",
-                    message=f"Imported remote post {remote_post_id} into image {image_id}.",
+                    message=f"Imported remote post {remote_post_id} into image {item.linked_image_id}.",
                     remote_post_id=remote_post_id,
-                    job_id=job_id,
-                    image_id=image_id,
+                    job_id=item.linked_job_id,
+                    image_id=item.linked_image_id,
                 )
-            elif outcome == "duplicate":
+            elif item.status == "duplicate":
                 duplicate_posts += 1
                 append_event(
                     db,
                     run,
                     level="warning",
                     event_type="duplicate",
-                    message=message or f"Remote post {remote_post_id} matched an existing image.",
+                    message=item.detail_message or f"Remote post {remote_post_id} matched an existing image.",
                     remote_post_id=remote_post_id,
-                    job_id=job_id,
-                    image_id=image_id,
+                    job_id=item.linked_job_id,
+                    image_id=item.linked_image_id,
                 )
-            else:
+            elif item.status in {"failed", "rejected"}:
                 failed_posts += 1
                 append_event(
                     db,
                     run,
                     level="error",
                     event_type="job_failed",
-                    message=message or f"Worker failed remote post {remote_post_id}.",
+                    message=item.detail_message or f"Worker failed remote post {remote_post_id}.",
                     remote_post_id=remote_post_id,
-                    job_id=job_id,
+                    job_id=item.linked_job_id,
                 )
-            seen_job_ids.add(job_id)
+            else:
+                continue
+            seen_item_ids.add(item.id)
 
-        update_run_counts(db, run, completed_posts=completed_posts, duplicate_posts=duplicate_posts, failed_posts=failed_posts)
-        if len(seen_job_ids) >= len(accepted_jobs):
+        update_run_counts(
+            db,
+            run,
+            queued_posts=queued_posts,
+            completed_posts=completed_posts,
+            duplicate_posts=duplicate_posts,
+            failed_posts=failed_posts,
+        )
+        if len(seen_item_ids) >= len(accepted_items):
             return
 
         time.sleep(BOARD_IMPORT_POLL_SECONDS)
 
-    remaining = len(accepted_jobs) - len(seen_job_ids)
+    remaining = len(accepted_items) - len(seen_item_ids)
     append_event(
         db,
         run,
         level="error",
         event_type="timeout",
-        message=f"Timed out waiting for {remaining} board-import job outcomes.",
+        message=f"Timed out waiting for {remaining} board-import pipeline items.",
     )
     update_run_counts(db, run, failed_posts=failed_posts + max(remaining, 1))
 
@@ -489,16 +522,17 @@ def process_run(run_id: int) -> None:
                         return
                     try:
                         local_path = download_remote_post(adapter.session, post, temp_root)
-                        queue_path, checksum_sha256 = StorageService().stage_local_file_to_queue(local_path)
-                        file_size = Path(queue_path).stat().st_size
+                        quarantine_path, checksum_sha256 = StorageService().stage_local_file_to_quarantine(local_path)
+                        file_size = Path(quarantine_path).stat().st_size
                         client_key = f"{post.board}:{post.post_id}"
                         staged_uploads.append(
                             {
                                 "client_key": client_key,
                                 "filename": post.filename,
-                                "queue_path": queue_path,
+                                "quarantine_path": quarantine_path,
                                 "checksum_sha256": checksum_sha256,
                                 "file_size": file_size,
+                                "mime_type": getattr(post, "mime_type", None) or mimetypes.guess_type(post.filename)[0] or "application/octet-stream",
                             }
                         )
                         remote_post_map[client_key] = (post.post_id, post.tags)
@@ -540,25 +574,15 @@ def process_run(run_id: int) -> None:
                     source_name=f"board-import:{run.board_name}:{run.id}",
                     rejected=[],
                 )
-                import_id = upload_response.meta.get("import_id")
+                pipeline_batch_id = upload_response.meta.get("pipeline_batch_id")
                 queued_posts = run.queued_posts
                 duplicate_posts = run.duplicate_posts
                 failed_posts = run.failed_posts
-                accepted_jobs: list[tuple[int, str, list[str]]] = []
+                accepted_items: list[tuple[int, str, list[str]]] = []
 
                 for accepted in upload_response.data:
                     remote_post_id, tag_list = remote_post_map.get(accepted.client_key, (accepted.client_key, tags))
-                    queued_posts += 1
-                    accepted_jobs.append((accepted.job_id, remote_post_id, tag_list))
-                    append_event(
-                        db,
-                        run,
-                        level="info",
-                        event_type="queued",
-                        message=f"Queued remote post {remote_post_id} as worker job {accepted.job_id}.",
-                        remote_post_id=remote_post_id,
-                        job_id=accepted.job_id,
-                    )
+                    accepted_items.append((accepted.upload_item_id, remote_post_id, tag_list))
 
                 for rejected in upload_response.rejected:
                     remote_post_id, _tag_list = remote_post_map.get(rejected.client_key, (rejected.client_key, tags))
@@ -583,17 +607,16 @@ def process_run(run_id: int) -> None:
                 update_run_counts(
                     db,
                     run,
-                    source_import_batch_id=int(import_id) if str(import_id).isdigit() else None,
                     queued_posts=queued_posts,
                     duplicate_posts=duplicate_posts,
                     failed_posts=failed_posts,
                 )
 
-                wait_for_import_batch(
+                wait_for_upload_pipeline_batch(
                     db,
                     run,
-                    int(import_id) if str(import_id).isdigit() else None,
-                    accepted_jobs,
+                    int(pipeline_batch_id) if str(pipeline_batch_id).isdigit() else None,
+                    accepted_items,
                 )
 
             run = db.get(BoardImportRun, run_id)

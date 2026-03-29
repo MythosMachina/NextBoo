@@ -34,6 +34,7 @@ class MoebooruAdapter(BaseAdapter):
                         post_id=post_id,
                         file_url=file_url,
                         filename=self.filename_from_url(file_url, post_id),
+                        mime_type=self.mime_type_from_filename(self.filename_from_url(file_url, post_id)),
                         tags=self.dedupe_tags((post.get("tags") or "").split()),
                         source_url=f"{self.preset.site_url.rstrip('/')}/post/show/{post_id}",
                         md5=post.get("md5"),

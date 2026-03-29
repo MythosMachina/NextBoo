@@ -43,6 +43,7 @@ class DanbooruAdapter(BaseAdapter):
                         post_id=post_id,
                         file_url=file_url,
                         filename=self.filename_from_url(file_url, post_id),
+                        mime_type=self.mime_type_from_filename(self.filename_from_url(file_url, post_id)),
                         tags=tags_flat,
                         source_url=f"{self.preset.site_url.rstrip('/')}/posts/{post_id}",
                         md5=post.get("md5"),

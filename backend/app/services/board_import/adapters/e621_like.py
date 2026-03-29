@@ -43,6 +43,7 @@ class E621LikeAdapter(BaseAdapter):
                         post_id=post_id,
                         file_url=file_url,
                         filename=filename,
+                        mime_type=self.mime_type_from_filename(filename),
                         tags=tags_flat,
                         source_url=source_url,
                         md5=(post.get("file") or {}).get("md5"),

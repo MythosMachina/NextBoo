@@ -9,6 +9,7 @@ class RemotePost:
     post_id: str
     file_url: str
     filename: str
+    mime_type: str | None = None
     tags: list[str] = field(default_factory=list)
     source_url: str | None = None
     md5: str | None = None

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import mimetypes
 from pathlib import Path
 
 import requests
@@ -37,6 +38,10 @@ class BaseAdapter:
     @staticmethod
     def filename_from_url(url: str, fallback: str) -> str:
         return Path(url).name or fallback
+
+    @staticmethod
+    def mime_type_from_filename(filename: str) -> str | None:
+        return mimetypes.guess_type(filename)[0]
 
     def search_posts(self, tags: list[str], limit: int) -> list[RemotePost]:
         raise NotImplementedError()
