@@ -16,6 +16,9 @@ from app.tagger import TagPrediction, Tagger, merge_predictions
 
 logger = logging.getLogger("worker.pipeline")
 
+MOTION_FRAME_POSITIONS = [0.08, 0.28, 0.5, 0.72, 0.88]
+MOTION_FRAME_FALLBACK_OFFSETS = [0.0, -0.08, 0.08, -0.16, 0.16]
+
 
 class SourceFileMissingError(FileNotFoundError):
     pass
@@ -174,6 +177,53 @@ def extract_frame_to_png_with_retries(
     raise AnalysisFrameGenerationError(str(last_error) if last_error else f"Expected extracted frame at {target_path}")
 
 
+def clamp_motion_position(position_ratio: float) -> float:
+    return max(0.0, min(position_ratio, 0.94))
+
+
+def extract_motion_analysis_frames(
+    source_path: Path,
+    workdir: Path,
+) -> list[Path]:
+    extracted_frames: list[Path] = []
+    for index, base_position in enumerate(MOTION_FRAME_POSITIONS):
+        frame_path = workdir / f"analysis_frame_{index}.png"
+        success = False
+        for offset in MOTION_FRAME_FALLBACK_OFFSETS:
+            candidate_position = clamp_motion_position(base_position + offset)
+            try:
+                extract_frame_to_png_with_retries(
+                    source_path,
+                    frame_path,
+                    candidate_position,
+                    max_attempts=2,
+                )
+                extracted_frames.append(frame_path)
+                success = True
+                if offset != 0.0:
+                    logger.info(
+                        "motion analysis used fallback frame source=%s frame=%s base=%s candidate=%s",
+                        source_path.name,
+                        frame_path.name,
+                        base_position,
+                        candidate_position,
+                    )
+                break
+            except AnalysisFrameGenerationError:
+                frame_path.unlink(missing_ok=True)
+                continue
+        if not success:
+            logger.warning(
+                "motion analysis skipped frame source=%s frame=%s base=%s",
+                source_path.name,
+                frame_path.name,
+                base_position,
+            )
+    if not extracted_frames:
+        raise AnalysisFrameGenerationError(f"Could not extract any analysis frames from {source_path}")
+    return extracted_frames
+
+
 def extract_mid_frame_with_pillow(source_path: Path, target_path: Path) -> tuple[int, int]:
     return extract_frame_with_pillow(source_path, target_path, 0.5)
 
@@ -302,22 +352,13 @@ def process_animated_or_video(
     tagger: Tagger,
 ) -> tuple[int, int, str, TagPrediction, int | None, int | None, int | None, str | None]:
     shutil.copy2(local_input, original_path)
-    frame_positions = [0.0, 0.25, 0.5, 0.75, 1.0]
-    extracted_frames: list[Path] = []
-    predictions: list[TagPrediction] = []
-    width = 0
-    height = 0
-
-    for index, position_ratio in enumerate(frame_positions):
-        frame_path = workdir / f"analysis_frame_{index}.png"
-        current_width, current_height = extract_frame_to_png(local_input, frame_path, position_ratio)
-        if index == 2:
-            generate_thumbnail(frame_path, thumb_path, thumb_max_edge)
-            width, height = current_width, current_height
-        extracted_frames.append(frame_path)
-        predictions.append(tagger.predict(frame_path))
-
-    perceptual_hash = compute_perceptual_hash(extracted_frames[2])
+    extracted_frames = extract_motion_analysis_frames(local_input, workdir)
+    predictions = [tagger.predict(frame_path) for frame_path in extracted_frames]
+    representative_frame = extracted_frames[len(extracted_frames) // 2]
+    with Image.open(representative_frame) as image:
+        width, height = image.width, image.height
+    generate_thumbnail(representative_frame, thumb_path, thumb_max_edge)
+    perceptual_hash = compute_perceptual_hash(representative_frame)
     tag_prediction = merge_predictions(predictions)
     for extracted_frame in extracted_frames:
         extracted_frame.unlink(missing_ok=True)
@@ -368,15 +409,8 @@ def predict_existing_animated_or_video(
     workdir: Path,
     tagger: Tagger,
 ) -> TagPrediction:
-    frame_positions = [0.0, 0.25, 0.5, 0.75, 1.0]
-    extracted_frames: list[Path] = []
-    predictions: list[TagPrediction] = []
-
-    for index, position_ratio in enumerate(frame_positions):
-        frame_path = workdir / f"analysis_frame_{index}.png"
-        extract_frame_to_png_with_retries(local_input, frame_path, position_ratio)
-        extracted_frames.append(frame_path)
-        predictions.append(tagger.predict(frame_path))
+    extracted_frames = extract_motion_analysis_frames(local_input, workdir)
+    predictions = [tagger.predict(frame_path) for frame_path in extracted_frames]
 
     merged = merge_predictions(predictions)
     for extracted_frame in extracted_frames:
